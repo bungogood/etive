@@ -1,0 +1,347 @@
+use std::io::{self, BufRead, Write};
+use std::str::FromStr;
+
+use etive::othello::{Board, Color, GameStatus, Move, Square};
+
+const COMMANDS: &[&str] = &[
+    "protocol_version",
+    "name",
+    "version",
+    "known_command",
+    "list_commands",
+    "quit",
+    "boardsize",
+    "clear_board",
+    "komi",
+    "play",
+    "genmove",
+    "reg_genmove",
+    "undo",
+    "set_game",
+    "list_games",
+    "showboard",
+    "final_score",
+];
+
+pub(crate) fn run(reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
+    let mut session = Session::default();
+    for line in reader.lines() {
+        let Some(response) = session.execute(&line?) else {
+            continue;
+        };
+        writer.write_all(response.render().as_bytes())?;
+        writer.flush()?;
+        if response.quit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct Session {
+    board: Board,
+    history: Vec<Board>,
+}
+
+impl Session {
+    fn execute(&mut self, line: &str) -> Option<Response> {
+        let input = line.split('#').next().unwrap_or_default();
+        let mut fields = input.split_ascii_whitespace().peekable();
+        let first = fields.next()?;
+        let id = first
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| first.to_owned());
+        let command = if id.is_some() {
+            match fields.next() {
+                Some(command) => command,
+                None => return Some(Response::failure(id, "missing command")),
+            }
+        } else {
+            first
+        };
+        let arguments: Vec<_> = fields.collect();
+
+        let result = match command {
+            "protocol_version" => no_arguments(&arguments).map(|()| "2".to_owned()),
+            "name" => no_arguments(&arguments).map(|()| "Etive".to_owned()),
+            "version" => no_arguments(&arguments).map(|()| env!("CARGO_PKG_VERSION").to_owned()),
+            "known_command" => {
+                one_argument(&arguments).map(|command| COMMANDS.contains(&command).to_string())
+            }
+            "list_commands" => no_arguments(&arguments).map(|()| COMMANDS.join("\n")),
+            "boardsize" => self.boardsize(&arguments),
+            "clear_board" => no_arguments(&arguments).map(|()| self.clear()),
+            "komi" => parse_komi(&arguments),
+            "play" => self.play(&arguments),
+            "genmove" => self.genmove(&arguments, true),
+            "reg_genmove" => self.genmove(&arguments, false),
+            "undo" => self.undo(&arguments),
+            "set_game" => set_game(&arguments),
+            "list_games" => no_arguments(&arguments).map(|()| "Othello".to_owned()),
+            "showboard" => no_arguments(&arguments).map(|()| self.board.to_string()),
+            "final_score" => no_arguments(&arguments).map(|()| self.final_score()),
+            "quit" => {
+                return Some(match no_arguments(&arguments) {
+                    Ok(()) => Response::success(id, String::new()).with_quit(),
+                    Err(error) => Response::failure(id, error),
+                });
+            }
+            _ => Err("unknown command".to_owned()),
+        };
+
+        Some(match result {
+            Ok(body) => Response::success(id, body),
+            Err(error) => Response::failure(id, error),
+        })
+    }
+
+    fn boardsize(&mut self, arguments: &[&str]) -> Result<String, String> {
+        let size = one_argument(arguments)?;
+        if size != "8" {
+            return Err("unacceptable size".to_owned());
+        }
+        Ok(self.clear())
+    }
+
+    fn clear(&mut self) -> String {
+        self.board = Board::default();
+        self.history.clear();
+        String::new()
+    }
+
+    fn play(&mut self, arguments: &[&str]) -> Result<String, String> {
+        if arguments.len() != 2 {
+            return Err("expected color and move".to_owned());
+        }
+        self.require_turn(arguments[0])?;
+        let mv = parse_move(arguments[1])?;
+        if !self.board.is_legal(mv) {
+            return Err("illegal move".to_owned());
+        }
+        self.history.push(self.board);
+        self.board.play_unchecked(mv);
+        Ok(String::new())
+    }
+
+    fn genmove(&mut self, arguments: &[&str], play_move: bool) -> Result<String, String> {
+        let color = one_argument(arguments)?;
+        self.require_turn(color)?;
+
+        let mv = match self.board.legal_moves().into_iter().next() {
+            Some(square) => Move::Place(square),
+            None if self.board.is_pass_legal() => Move::Pass,
+            None => return Ok("pass".to_owned()),
+        };
+        if play_move {
+            self.history.push(self.board);
+            self.board.play_unchecked(mv);
+        }
+        Ok(format_move(mv))
+    }
+
+    fn require_turn(&self, color: &str) -> Result<(), String> {
+        let color = parse_color(color)?;
+        if color != self.board.side_to_move() {
+            return Err("wrong color".to_owned());
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, arguments: &[&str]) -> Result<String, String> {
+        no_arguments(arguments)?;
+        self.board = self.history.pop().ok_or_else(|| "cannot undo".to_owned())?;
+        Ok(String::new())
+    }
+
+    fn final_score(&self) -> String {
+        let black = self.board.discs(Color::Black).len();
+        let white = self.board.discs(Color::White).len();
+        match self.board.status() {
+            GameStatus::Won(Color::Black) => format!("B+{}", black - white),
+            GameStatus::Won(Color::White) => format!("W+{}", white - black),
+            GameStatus::Drawn => "0".to_owned(),
+            GameStatus::Ongoing => "unknown".to_owned(),
+        }
+    }
+}
+
+struct Response {
+    id: Option<String>,
+    body: String,
+    success: bool,
+    quit: bool,
+}
+
+impl Response {
+    fn success(id: Option<String>, body: String) -> Self {
+        Self {
+            id,
+            body,
+            success: true,
+            quit: false,
+        }
+    }
+
+    fn failure(id: Option<String>, body: impl Into<String>) -> Self {
+        Self {
+            id,
+            body: body.into(),
+            success: false,
+            quit: false,
+        }
+    }
+
+    fn with_quit(mut self) -> Self {
+        self.quit = true;
+        self
+    }
+
+    fn render(&self) -> String {
+        let marker = if self.success { '=' } else { '?' };
+        let id = self.id.as_deref().unwrap_or_default();
+        if self.body.is_empty() {
+            format!("{marker}{id}\n\n")
+        } else {
+            format!("{marker}{id} {}\n\n", self.body)
+        }
+    }
+}
+
+fn no_arguments(arguments: &[&str]) -> Result<(), String> {
+    if arguments.is_empty() {
+        Ok(())
+    } else {
+        Err("unexpected arguments".to_owned())
+    }
+}
+
+fn one_argument<'a>(arguments: &'a [&str]) -> Result<&'a str, String> {
+    match arguments {
+        [argument] => Ok(argument),
+        _ => Err("expected one argument".to_owned()),
+    }
+}
+
+fn parse_color(color: &str) -> Result<Color, String> {
+    if color.eq_ignore_ascii_case("black") || color.eq_ignore_ascii_case("b") {
+        Ok(Color::Black)
+    } else if color.eq_ignore_ascii_case("white") || color.eq_ignore_ascii_case("w") {
+        Ok(Color::White)
+    } else {
+        Err("invalid color".to_owned())
+    }
+}
+
+fn parse_move(value: &str) -> Result<Move, String> {
+    if value.eq_ignore_ascii_case("pass") {
+        Ok(Move::Pass)
+    } else {
+        Square::from_str(value)
+            .map(Move::Place)
+            .map_err(|_| "invalid move".to_owned())
+    }
+}
+
+fn format_move(mv: Move) -> String {
+    match mv {
+        Move::Place(square) => square.to_string(),
+        Move::Pass => "pass".to_owned(),
+    }
+}
+
+fn parse_komi(arguments: &[&str]) -> Result<String, String> {
+    one_argument(arguments)?
+        .parse::<f64>()
+        .map(|_| String::new())
+        .map_err(|_| "invalid komi".to_owned())
+}
+
+fn set_game(arguments: &[&str]) -> Result<String, String> {
+    let game = one_argument(arguments)?;
+    if game.eq_ignore_ascii_case("othello") {
+        Ok(String::new())
+    } else {
+        Err("unsupported game".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+    use etive::othello::BitBoard;
+
+    fn exchange(input: &str) -> String {
+        let mut output = Vec::new();
+        run(Cursor::new(input), &mut output).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn reports_protocol_metadata_with_command_ids() {
+        assert_eq!(
+            exchange("1 protocol_version\n2 name\n3 version\n4 quit\n"),
+            format!(
+                "=1 2\n\n=2 Etive\n\n=3 {}\n\n=4\n\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_commands_and_bad_arguments() {
+        assert_eq!(
+            exchange("9 boardsize 6\nwat\nkomi nope\nquit now\n"),
+            "?9 unacceptable size\n\n? unknown command\n\n? invalid komi\n\n? unexpected arguments\n\n"
+        );
+    }
+
+    #[test]
+    fn plays_and_generates_moves_without_mutating_on_failure() {
+        assert_eq!(
+            exchange("play black a1\ngenmove black\nplay black c3\ngenmove white\nquit\n"),
+            "? illegal move\n\n= d3\n\n? wrong color\n\n= c3\n\n=\n\n"
+        );
+    }
+
+    #[test]
+    fn regression_generation_and_undo_preserve_expected_state() {
+        assert_eq!(
+            exchange("reg_genmove b\nreg_genmove black\ngenmove b\nundo\ngenmove black\nquit\n"),
+            "= d3\n\n= d3\n\n= d3\n\n=\n\n= d3\n\n=\n\n"
+        );
+    }
+
+    #[test]
+    fn handles_forced_passes() {
+        let a1 = Square::from_str("a1").unwrap().bitboard();
+        let b1 = Square::from_str("b1").unwrap().bitboard();
+        let mut session = Session {
+            board: Board::from_discs(a1, b1, Color::White).unwrap(),
+            history: Vec::new(),
+        };
+
+        let response = session.execute("genmove white").unwrap();
+        assert_eq!(response.render(), "= pass\n\n");
+        assert_eq!(session.board.side_to_move(), Color::Black);
+        assert_eq!(
+            session.board.legal_moves(),
+            Square::from_str("c1").unwrap().bitboard()
+        );
+    }
+
+    #[test]
+    fn reports_terminal_scores() {
+        let mut session = Session {
+            board: Board::from_discs(BitBoard::FULL, BitBoard::EMPTY, Color::White).unwrap(),
+            history: Vec::new(),
+        };
+        assert_eq!(
+            session.execute("final_score").unwrap().render(),
+            "= B+64\n\n"
+        );
+    }
+}

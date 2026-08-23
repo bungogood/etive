@@ -4,6 +4,8 @@ use candle_core::{Device, Tensor};
 use clap::{Parser, Subcommand};
 use etive::othello::{Board, perft};
 
+mod gtp;
+
 #[derive(Parser)]
 #[command(version, about, arg_required_else_help = true)]
 struct Cli {
@@ -15,6 +17,8 @@ struct Cli {
 enum Command {
     /// Verify Candle on the selected device.
     Candle,
+    /// Run as a Go Text Protocol v2 Othello engine.
+    Gtp,
     /// Count opening-position leaves.
     Perft {
         /// Search depth in plies.
@@ -38,6 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tensor = Tensor::new(&[1_f32, 2.0, 3.0, 4.0], &device)?;
             let result = tensor.sqr()?.sum_all()?.to_scalar::<f32>()?;
             println!("Candle smoke test passed on {device:?}: {result}");
+        }
+        Command::Gtp => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            gtp::run(stdin.lock(), stdout.lock())?;
         }
     }
     Ok(())

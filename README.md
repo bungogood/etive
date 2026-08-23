@@ -58,6 +58,21 @@ enabling a Cargo feature does not install them.
 
 Use `cargo run -- --help` to display the available commands.
 
+## Engine Protocol
+
+Etive can run as a [Go Text Protocol v2](https://www.gnu.org/software/gnugo/gnugo_19.html)
+Othello engine for integration with match runners and engines such as Edax and
+Egaroucid:
+
+```bash
+cargo run --release -- gtp
+```
+
+The current protocol player selects the first legal move deterministically. It
+exists to validate interoperability before MCTS supplies competitive moves.
+Diagnostics must go to stderr while GTP is active because stdout is reserved
+for protocol responses.
+
 ## Development
 
 ```bash

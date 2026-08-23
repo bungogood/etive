@@ -1,0 +1,9 @@
+/target
+/.agents/
+/HANDOVER.md
+
+# Local training and profiling artifacts.
+/artifacts/
+/checkpoints/
+/data/
+/profiles/

@@ -1,0 +1,29 @@
+[package]
+name = "etive"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "An AlphaZero-style game learning framework built with Candle"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+cudnn = ["candle-core/cudnn", "candle-nn/cudnn"]
+metal = ["candle-core/metal", "candle-nn/metal"]
+
+[dependencies]
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+clap = { version = "4.5.46", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "rules"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"

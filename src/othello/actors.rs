@@ -169,12 +169,16 @@ fn run_inference(
     mut evaluator: OthelloCandleEvaluator,
     batch_size: usize,
     requests: Receiver<InferenceRequest>,
-    responses: Vec<Sender<InferenceResponse>>,
+    responses: Vec<Sender<Vec<InferenceResponse>>>,
 ) -> Result<(u64, u64), ActorError> {
     let mut batch = Vec::with_capacity(batch_size);
     let mut positions = Vec::with_capacity(batch_size);
     let mut policies = Vec::with_capacity(batch_size * Board::ACTION_COUNT);
     let mut values = Vec::with_capacity(batch_size);
+    let mut worker_responses = responses
+        .iter()
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<InferenceResponse>>>();
 
     while let Ok(first) = requests.recv() {
         batch.clear();
@@ -194,16 +198,24 @@ fn run_inference(
             .evaluate_batch(&positions, &mut policies, &mut values)
             .map_err(ActorError::Evaluator)?;
 
+        for responses in &mut worker_responses {
+            responses.clear();
+        }
         for (index, request) in batch.iter().enumerate() {
             let start = index * Board::ACTION_COUNT;
             let mut policy = [0.0; 65];
             policy.copy_from_slice(&policies[start..start + Board::ACTION_COUNT]);
-            let _ = responses[request.worker].send(InferenceResponse {
+            worker_responses[request.worker].push(InferenceResponse {
                 tree: request.tree,
                 request: request.request,
                 policy,
                 value: values[index],
             });
+        }
+        for (worker, worker_batch) in worker_responses.iter_mut().enumerate() {
+            if !worker_batch.is_empty() {
+                let _ = responses[worker].send(std::mem::take(worker_batch));
+            }
         }
     }
 
@@ -216,7 +228,7 @@ fn run_worker(
     owns_first_game: bool,
     simulations: u32,
     requests: Sender<InferenceRequest>,
-    responses: Receiver<InferenceResponse>,
+    responses: Receiver<Vec<InferenceResponse>>,
 ) -> Result<WorkerResult, ActorError> {
     let mut games = (0..game_count)
         .map(|_| ActorGame {
@@ -228,12 +240,8 @@ fn run_worker(
 
     loop {
         let mut progressed = false;
-        while let Ok(response) = responses.try_recv() {
-            let game = &mut games[response.tree];
-            game.tree
-                .complete(response.request, &response.policy, response.value)
-                .map_err(ActorError::Mcts)?;
-            game.simulations += 1;
+        while let Ok(response_batch) = responses.try_recv() {
+            complete_responses(&mut games, response_batch)?;
             progressed = true;
         }
 
@@ -285,12 +293,8 @@ fn run_worker(
             break;
         }
         if !progressed {
-            let response = responses.recv().map_err(|_| ActorError::InferenceStopped)?;
-            let game = &mut games[response.tree];
-            game.tree
-                .complete(response.request, &response.policy, response.value)
-                .map_err(ActorError::Mcts)?;
-            game.simulations += 1;
+            let response_batch = responses.recv().map_err(|_| ActorError::InferenceStopped)?;
+            complete_responses(&mut games, response_batch)?;
         }
     }
 
@@ -302,6 +306,20 @@ fn run_worker(
         first_game_actions,
         draws,
     })
+}
+
+fn complete_responses(
+    games: &mut [ActorGame],
+    responses: Vec<InferenceResponse>,
+) -> Result<(), ActorError> {
+    for response in responses {
+        let game = &mut games[response.tree];
+        game.tree
+            .complete(response.request, &response.policy, response.value)
+            .map_err(ActorError::Mcts)?;
+        game.simulations += 1;
+    }
+    Ok(())
 }
 
 fn shard_len(games: usize, workers: usize, worker: usize) -> usize {

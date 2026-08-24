@@ -6,6 +6,7 @@ use etive::evaluator::OthelloCandleEvaluator;
 use etive::game::Game;
 use etive::mcts::{Mcts, MctsConfig, run_batched};
 use etive::othello::{Board, perft};
+use rayon::prelude::*;
 
 mod gtp;
 
@@ -80,28 +81,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut searches = (0..games)
                 .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
                 .collect::<Vec<_>>();
+            let mut actions = vec![None; games];
             let mut first_game_actions = Vec::new();
             let start = Instant::now();
             while searches
-                .iter()
+                .par_iter()
                 .any(|search| search.root_position().outcome().is_none())
             {
                 run_batched(&mut searches, &mut evaluator, simulations, batch_size)?;
-                for (index, search) in searches.iter_mut().enumerate() {
-                    if search.root_position().outcome().is_some() {
-                        continue;
-                    }
-                    let action = search
-                        .best_action()
-                        .ok_or("search produced no legal action")?;
-                    if index == 0 {
-                        first_game_actions.push(Board::action_index(action));
-                    }
-                    assert!(search.advance(action));
+                searches
+                    .par_iter()
+                    .zip(actions.par_iter_mut())
+                    .for_each(|(search, action)| {
+                        *action = if search.root_position().outcome().is_none() {
+                            search.best_action()
+                        } else {
+                            None
+                        };
+                    });
+                if searches.iter().zip(&actions).any(|(search, action)| {
+                    search.root_position().outcome().is_none() && action.is_none()
+                }) {
+                    return Err("search produced no legal action".into());
                 }
+                if let Some(action) = actions[0] {
+                    first_game_actions.push(Board::action_index(action));
+                }
+                searches
+                    .par_iter_mut()
+                    .zip(actions.par_iter())
+                    .for_each(|(search, &action)| {
+                        if let Some(action) = action {
+                            assert!(search.advance(action));
+                        }
+                    });
             }
             let draws = searches
-                .iter()
+                .par_iter()
                 .filter(|search| {
                     search.root_position().outcome() == Some(etive::game::Outcome::Draw)
                 })

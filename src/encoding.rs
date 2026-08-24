@@ -1,5 +1,7 @@
 //! Allocation-free game-state encoding for neural-network batches.
 
+use rayon::prelude::*;
+
 use crate::game::Game;
 use crate::{othello, tic_tac_toe};
 
@@ -46,6 +48,25 @@ impl StateEncoder<othello::Board> for OthelloEncodingV1 {
             othello::Square::NUM,
             output,
         );
+    }
+
+    fn encode_batch(&self, games: &[othello::Board], output: &mut [f32]) {
+        let encoded_len = Self::encoded_len();
+        assert_eq!(
+            output.len(),
+            games.len() * encoded_len,
+            "incorrect batch encoding buffer length"
+        );
+        if games.len() < 256 {
+            for (game, state) in games.iter().zip(output.chunks_exact_mut(encoded_len)) {
+                self.encode(game, state);
+            }
+            return;
+        }
+        games
+            .par_iter()
+            .zip(output.par_chunks_exact_mut(encoded_len))
+            .for_each(|(game, state)| self.encode(game, state));
     }
 }
 

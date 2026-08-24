@@ -156,7 +156,53 @@ fn search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, search);
+fn hybrid(c: &mut Criterion) {
+    #[cfg(all(feature = "accelerate", feature = "metal"))]
+    {
+        let cpu_batch_size = 256;
+        let metal_batch_size = 128;
+        let cpu_positions = vec![othello::Board::default(); cpu_batch_size];
+        let metal_positions = vec![othello::Board::default(); metal_batch_size];
+        let mut cpu = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let mut metal = OthelloCandleEvaluator::new(Device::new_metal(0).unwrap(), 7).unwrap();
+        let mut cpu_policies = vec![0.0; cpu_batch_size * othello::Board::ACTION_COUNT];
+        let mut metal_policies = vec![0.0; metal_batch_size * othello::Board::ACTION_COUNT];
+        let mut cpu_values = vec![0.0; cpu_batch_size];
+        let mut metal_values = vec![0.0; metal_batch_size];
+        let mut group = c.benchmark_group("hybrid");
+        group.throughput(Throughput::Elements(
+            (cpu_batch_size + metal_batch_size) as u64,
+        ));
+        group.bench_function("Othello Accelerate 256 + Metal 128", |bencher| {
+            bencher.iter(|| {
+                std::thread::scope(|scope| {
+                    let cpu_run = scope.spawn(|| {
+                        cpu.evaluate_batch(
+                            black_box(&cpu_positions),
+                            black_box(&mut cpu_policies),
+                            black_box(&mut cpu_values),
+                        )
+                    });
+                    let metal_run = scope.spawn(|| {
+                        metal.evaluate_batch(
+                            black_box(&metal_positions),
+                            black_box(&mut metal_policies),
+                            black_box(&mut metal_values),
+                        )
+                    });
+                    cpu_run.join().unwrap().unwrap();
+                    metal_run.join().unwrap().unwrap();
+                })
+            });
+        });
+        group.finish();
+    }
+
+    #[cfg(not(all(feature = "accelerate", feature = "metal")))]
+    let _ = c;
+}
+
+criterion_group!(benches, search, hybrid);
 criterion_main!(benches);
 
 fn benchmark_device() -> Device {

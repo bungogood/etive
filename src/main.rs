@@ -38,6 +38,15 @@ enum Command {
         /// Persistent game-owning actor threads.
         #[arg(long)]
         workers: Option<usize>,
+        /// Dirichlet concentration mixed into each self-play root.
+        #[arg(long, default_value_t = 0.3)]
+        dirichlet_alpha: f64,
+        /// Fraction of each root prior replaced by Dirichlet noise.
+        #[arg(long, default_value_t = 0.25)]
+        dirichlet_fraction: f32,
+        /// Opening plies sampled from visit counts before greedy play.
+        #[arg(long, default_value_t = 20)]
+        temperature_moves: usize,
     },
     /// Count opening-position leaves.
     Perft {
@@ -74,9 +83,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             games,
             batch_size,
             workers,
+            dirichlet_alpha,
+            dirichlet_fraction,
+            temperature_moves,
         } => {
-            if simulations == 0 || games == 0 || batch_size == 0 {
-                return Err("simulations, games, and batch size must be greater than zero".into());
+            if simulations < 2 || games == 0 || batch_size == 0 {
+                return Err(
+                    "games and batch size must be positive; simulations must be at least two"
+                        .into(),
+                );
             }
             let device = candle_device()?;
             let evaluator = OthelloCandleEvaluator::new(device, seed)?;
@@ -89,11 +104,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     simulations,
                     workers,
                     inference_batch_size: batch_size,
+                    seed,
+                    dirichlet_alpha,
+                    dirichlet_fraction,
+                    temperature_moves,
                 },
             )?;
             let elapsed = start.elapsed();
             println!("first game actions: {:?}", result.first_game_actions);
             println!("draws: {}/{games}", result.draws);
+            println!(
+                "self-play data: {} positions from {} unique games",
+                result.samples.len(),
+                result.unique_games
+            );
             println!(
                 "network evaluations: {} in {} batches ({:.1} average)",
                 result.evaluations,

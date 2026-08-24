@@ -368,6 +368,26 @@ impl<G: Game> Mcts<G> {
             .map(|stats| stats.action)
     }
 
+    /// Mixes normalized exploration noise into the current root priors.
+    pub fn mix_root_priors(&mut self, noise: &[f32], fraction: f32) -> bool {
+        if self.pending.is_some() || !(0.0..=1.0).contains(&fraction) {
+            return false;
+        }
+        let Some(range) = self.nodes[self.root].edge_range() else {
+            return false;
+        };
+        if noise.len() != range.len()
+            || noise.iter().any(|value| !value.is_finite() || *value < 0.0)
+            || (noise.iter().sum::<f32>() - 1.0).abs() > 1e-4
+        {
+            return false;
+        }
+        for (edge, &noise) in self.edges[range].iter_mut().zip(noise) {
+            edge.prior = (1.0 - fraction) * edge.prior + fraction * noise;
+        }
+        true
+    }
+
     /// Advances to a legal child, retaining its subtree and reclaiming siblings.
     pub fn advance(&mut self, action: G::Action) -> bool {
         if self.pending.is_some() {

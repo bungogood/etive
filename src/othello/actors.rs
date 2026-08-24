@@ -1,13 +1,17 @@
 //! Persistent self-play actors feeding one batched inference owner.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use rand_distr::{Distribution, Gamma};
 
-use super::Board;
+use super::{Board, Color, GameStatus};
 use crate::evaluator::{BatchEvaluator, OthelloCandleEvaluator};
 use crate::game::{Game, Outcome};
 use crate::mcts::{EvaluationRequest, Mcts, MctsConfig, MctsError, Selection};
@@ -18,6 +22,10 @@ pub struct ActorConfig {
     pub simulations: u32,
     pub workers: usize,
     pub inference_batch_size: usize,
+    pub seed: u64,
+    pub dirichlet_alpha: f64,
+    pub dirichlet_fraction: f32,
+    pub temperature_moves: usize,
 }
 
 #[derive(Debug)]
@@ -26,6 +34,15 @@ pub struct ActorRun {
     pub draws: usize,
     pub evaluations: u64,
     pub batches: u64,
+    pub unique_games: usize,
+    pub samples: Vec<SelfPlaySample>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SelfPlaySample {
+    pub position: Board,
+    pub policy: [f32; 65],
+    pub outcome: Outcome,
 }
 
 #[derive(Debug)]
@@ -76,18 +93,44 @@ struct InferenceResponse {
 struct ActorGame {
     tree: Mcts<Board>,
     simulations: u32,
+    root_noise_applied: bool,
+    noise: Vec<f32>,
+    records: Vec<PendingSample>,
+    trajectory_hash: u64,
+}
+
+struct PendingSample {
+    position: Board,
+    policy: [f32; 65],
+    player: Color,
 }
 
 struct WorkerResult {
     first_game_actions: Vec<usize>,
     draws: usize,
+    samples: Vec<SelfPlaySample>,
+    trajectory_hashes: Vec<u64>,
+}
+
+struct WorkerConfig {
+    worker: usize,
+    game_count: usize,
+    owns_first_game: bool,
+    simulations: u32,
+    seed: u64,
+    dirichlet_alpha: f64,
+    dirichlet_fraction: f32,
+    temperature_moves: usize,
 }
 
 pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<ActorRun, ActorError> {
     if config.games == 0
-        || config.simulations == 0
+        || config.simulations < 2
         || config.workers == 0
         || config.inference_batch_size == 0
+        || !config.dirichlet_alpha.is_finite()
+        || config.dirichlet_alpha <= 0.0
+        || !(0.0..=1.0).contains(&config.dirichlet_fraction)
     {
         return Err(ActorError::InvalidConfig);
     }
@@ -121,10 +164,16 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
         let requests = request_sender.clone();
         workers.push(thread::spawn(move || {
             run_worker(
-                worker,
-                game_count,
-                owns_first_game,
-                config.simulations,
+                WorkerConfig {
+                    worker,
+                    game_count,
+                    owns_first_game,
+                    simulations: config.simulations,
+                    seed: config.seed.wrapping_add(worker as u64),
+                    dirichlet_alpha: config.dirichlet_alpha,
+                    dirichlet_fraction: config.dirichlet_fraction,
+                    temperature_moves: config.temperature_moves,
+                },
                 requests,
                 responses,
             )
@@ -135,6 +184,8 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
     let mut first_game_actions = Vec::new();
     let mut draws = 0;
     let mut worker_error = None;
+    let mut samples = Vec::with_capacity(config.games.saturating_mul(60));
+    let mut trajectory_hashes = Vec::with_capacity(config.games);
     for worker in workers {
         match worker.join() {
             Ok(Ok(result)) => {
@@ -142,6 +193,8 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
                     first_game_actions = result.first_game_actions;
                 }
                 draws += result.draws;
+                samples.extend(result.samples);
+                trajectory_hashes.extend(result.trajectory_hashes);
             }
             Ok(Err(error)) => {
                 worker_error.get_or_insert(error);
@@ -162,6 +215,8 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
         draws,
         evaluations,
         batches,
+        unique_games: trajectory_hashes.into_iter().collect::<HashSet<_>>().len(),
+        samples,
     })
 }
 
@@ -211,17 +266,20 @@ fn run_inference(
 }
 
 fn run_worker(
-    worker: usize,
-    game_count: usize,
-    owns_first_game: bool,
-    simulations: u32,
+    config: WorkerConfig,
     requests: Sender<InferenceRequest>,
     responses: Receiver<InferenceResponse>,
 ) -> Result<WorkerResult, ActorError> {
-    let mut games = (0..game_count)
+    let mut random = StdRng::seed_from_u64(config.seed);
+    let dirichlet = Gamma::new(config.dirichlet_alpha, 1.0).expect("validated Dirichlet alpha");
+    let mut games = (0..config.game_count)
         .map(|_| ActorGame {
             tree: Mcts::new(Board::default(), MctsConfig::default()),
             simulations: 0,
+            root_noise_applied: false,
+            noise: Vec::new(),
+            records: Vec::with_capacity(64),
+            trajectory_hash: 0xcbf2_9ce4_8422_2325,
         })
         .collect::<Vec<_>>();
     let mut first_game_actions = Vec::new();
@@ -241,20 +299,40 @@ fn run_worker(
             if game.tree.root_position().outcome().is_some() {
                 continue;
             }
-            if game.simulations == simulations {
-                let action = game
-                    .tree
-                    .best_action()
-                    .ok_or(ActorError::Mcts(MctsError::NoLegalActions))?;
-                if owns_first_game && tree_index == 0 {
+            if game.simulations == config.simulations {
+                let policy = root_policy(&game.tree)?;
+                let action = select_action(
+                    &game.tree,
+                    game.records.len() < config.temperature_moves,
+                    &mut random,
+                )?;
+                if config.owns_first_game && tree_index == 0 {
                     first_game_actions.push(Board::action_index(action));
                 }
+                game.records.push(PendingSample {
+                    position: *game.tree.root_position(),
+                    policy,
+                    player: game.tree.root_position().side_to_move(),
+                });
+                game.trajectory_hash = game.trajectory_hash.wrapping_mul(0x0000_0100_0000_01b3)
+                    ^ Board::action_index(action) as u64;
                 assert!(game.tree.advance(action));
                 game.simulations = 0;
+                game.root_noise_applied = false;
                 progressed = true;
                 if game.tree.root_position().outcome().is_some() {
                     continue;
                 }
+            }
+            if !game.root_noise_applied && game.tree.root_stats().len() > 0 {
+                mix_root_noise(
+                    &mut game.tree,
+                    &mut game.noise,
+                    &dirichlet,
+                    config.dirichlet_fraction,
+                    &mut random,
+                );
+                game.root_noise_applied = true;
             }
             if game.tree.is_pending() {
                 continue;
@@ -267,7 +345,7 @@ fn run_worker(
                 Selection::Evaluate { request, position } => {
                     requests
                         .send(InferenceRequest {
-                            worker,
+                            worker: config.worker,
                             tree: tree_index,
                             request,
                             position: *position,
@@ -298,10 +376,87 @@ fn run_worker(
         .iter()
         .filter(|game| game.tree.root_position().outcome() == Some(Outcome::Draw))
         .count();
+    let mut samples = Vec::with_capacity(games.iter().map(|game| game.records.len()).sum());
+    let mut trajectory_hashes = Vec::with_capacity(games.len());
+    for game in &mut games {
+        let terminal = *game.tree.root_position();
+        samples.extend(game.records.drain(..).map(|record| SelfPlaySample {
+            position: record.position,
+            policy: record.policy,
+            outcome: outcome_for(record.player, terminal),
+        }));
+        trajectory_hashes.push(game.trajectory_hash);
+    }
     Ok(WorkerResult {
         first_game_actions,
         draws,
+        samples,
+        trajectory_hashes,
     })
+}
+
+fn root_policy(tree: &Mcts<Board>) -> Result<[f32; 65], ActorError> {
+    let total = tree.root_stats().map(|stats| stats.visits).sum::<u32>();
+    if total == 0 {
+        return Err(ActorError::Mcts(MctsError::NoLegalActions));
+    }
+    let mut policy = [0.0; 65];
+    for stats in tree.root_stats() {
+        policy[Board::action_index(stats.action)] = stats.visits as f32 / total as f32;
+    }
+    Ok(policy)
+}
+
+fn select_action(
+    tree: &Mcts<Board>,
+    sample: bool,
+    random: &mut StdRng,
+) -> Result<super::Move, ActorError> {
+    if !sample {
+        return tree
+            .best_action()
+            .ok_or(ActorError::Mcts(MctsError::NoLegalActions));
+    }
+    let total = tree.root_stats().map(|stats| stats.visits).sum::<u32>();
+    if total == 0 {
+        return Err(ActorError::Mcts(MctsError::NoLegalActions));
+    }
+    let mut selected = random.random_range(0..total);
+    for stats in tree.root_stats() {
+        if selected < stats.visits {
+            return Ok(stats.action);
+        }
+        selected -= stats.visits;
+    }
+    unreachable!("visit counts must contain the sampled action")
+}
+
+fn mix_root_noise(
+    tree: &mut Mcts<Board>,
+    noise: &mut Vec<f32>,
+    dirichlet: &Gamma<f64>,
+    fraction: f32,
+    random: &mut StdRng,
+) {
+    noise.resize(tree.root_stats().len(), 0.0);
+    let mut sum = 0.0;
+    for value in noise.iter_mut() {
+        *value = dirichlet.sample(random) as f32;
+        sum += *value;
+    }
+    for value in noise.iter_mut() {
+        *value /= sum;
+    }
+    assert!(tree.mix_root_priors(noise, fraction));
+}
+
+fn outcome_for(player: Color, terminal: Board) -> Outcome {
+    match terminal.status() {
+        GameStatus::Won(winner) if winner == player => Outcome::Win,
+        GameStatus::Won(_) => Outcome::Loss,
+        GameStatus::Drawn => Outcome::Draw,
+        GameStatus::Ongoing => unreachable!("self-play game must be terminal"),
+    }
 }
 
 fn shard_len(games: usize, workers: usize, worker: usize) -> usize {
@@ -324,6 +479,10 @@ mod tests {
                 simulations: 16,
                 workers: 2,
                 inference_batch_size: 8,
+                seed: 11,
+                dirichlet_alpha: 0.3,
+                dirichlet_fraction: 0.25,
+                temperature_moves: 20,
             },
         )
         .unwrap();
@@ -332,5 +491,16 @@ mod tests {
         assert!(result.draws <= 8);
         assert!(result.evaluations > 0);
         assert!(result.batches > 0);
+        assert!(result.unique_games > 1);
+        assert!(!result.samples.is_empty());
+        for sample in result.samples {
+            assert!((sample.policy.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            for (index, probability) in sample.policy.into_iter().enumerate() {
+                if probability > 0.0 {
+                    let action = Board::action_from_index(index).unwrap();
+                    assert!(sample.position.is_legal(action));
+                }
+            }
+        }
     }
 }

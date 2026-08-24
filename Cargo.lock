@@ -731,6 +731,8 @@ dependencies = [
  "clap",
  "criterion",
  "crossbeam-channel",
+ "rand",
+ "rand_distr",
 ]
 
 [[package]]

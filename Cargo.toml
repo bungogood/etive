@@ -23,6 +23,10 @@ criterion = "0.8.2"
 name = "rules"
 harness = false
 
+[[bench]]
+name = "search"
+harness = false
+
 [profile.release]
 codegen-units = 1
 lto = "fat"

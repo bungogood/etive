@@ -2,12 +2,13 @@
 
 Etive is an AlphaZero-style game-learning project written in Rust with
 [Candle](https://github.com/huggingface/candle) as its tensor backend. The
-current foundation is a tested, allocation-free Othello rules engine.
-Tic-tac-toe will provide an exact minimax oracle for validating MCTS and the
-learning loop before the system is applied to Othello.
+current foundation includes a tested, allocation-free Othello rules engine,
+tic-tac-toe with an exact minimax oracle, and direct-to-batch neural state
+encoding. Synchronous PUCT search uses contiguous node and edge arenas with
+subtree reuse and automatic compaction after each played move.
 
-The project is intentionally kept in one crate while its game, search,
-inference, and training boundaries are established through working code.
+The project is intentionally kept in one crate while its game, search, and
+inference boundaries are established through working code.
 
 ## Othello Rules
 
@@ -73,6 +74,27 @@ exists to validate interoperability before MCTS supplies competitive moves.
 Diagnostics must go to stderr while GTP is active because stdout is reserved
 for protocol responses.
 
+## Random Candle Search
+
+Run complete Othello games using PUCT search and a reproducibly initialized
+compact convolutional Candle policy/value network:
+
+```bash
+cargo run --release -- mcts --simulations 128 --seed 7
+cargo run --release -- mcts --games 64 --batch-size 64 --simulations 128
+```
+
+Terminal positions bypass the network. Their exact side-to-move-relative game
+result is negated across each search edge during backup.
+
+### Tic-Tac-Toe Validation
+
+Tic-tac-toe is a small deterministic fixture, not a training target. Its tests
+cover all 5,478 reachable positions, exact minimax outcomes, policy action
+mapping, MCTS selection and backup, terminal inference bypass, and agreement
+between synchronous and batched search. Othello will supply the actual
+self-play and learning pipeline.
+
 ## Development
 
 ```bash
@@ -81,6 +103,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --release
 cargo test --release -- --ignored
 cargo bench --bench rules
+cargo bench --bench search
 ```
 
 Etive is licensed under the [MIT License](LICENSE).

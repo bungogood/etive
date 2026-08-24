@@ -2,6 +2,9 @@ use std::time::Instant;
 
 use candle_core::{Device, Tensor};
 use clap::{Parser, Subcommand};
+use etive::evaluator::OthelloCandleEvaluator;
+use etive::game::Game;
+use etive::mcts::{Mcts, MctsConfig, run_batched};
 use etive::othello::{Board, perft};
 
 mod gtp;
@@ -19,6 +22,21 @@ enum Command {
     Candle,
     /// Run as a Go Text Protocol v2 Othello engine.
     Gtp,
+    /// Play Othello games with random Candle evaluation and MCTS.
+    Mcts {
+        /// Simulations performed before each move.
+        #[arg(long, default_value_t = 128)]
+        simulations: u32,
+        /// Reproducible random network seed.
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        /// Number of independent games searched together.
+        #[arg(long, default_value_t = 1)]
+        games: usize,
+        /// Maximum positions in one Candle invocation.
+        #[arg(long, default_value_t = 64)]
+        batch_size: usize,
+    },
     /// Count opening-position leaves.
     Perft {
         /// Search depth in plies.
@@ -47,6 +65,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             gtp::run(stdin.lock(), stdout.lock())?;
+        }
+        Command::Mcts {
+            simulations,
+            seed,
+            games,
+            batch_size,
+        } => {
+            if simulations == 0 || games == 0 || batch_size == 0 {
+                return Err("simulations, games, and batch size must be greater than zero".into());
+            }
+            let device = candle_device()?;
+            let mut evaluator = OthelloCandleEvaluator::new(device, seed)?;
+            let mut searches = (0..games)
+                .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
+                .collect::<Vec<_>>();
+            let mut first_game_actions = Vec::new();
+            let start = Instant::now();
+            while searches
+                .iter()
+                .any(|search| search.root_position().outcome().is_none())
+            {
+                run_batched(&mut searches, &mut evaluator, simulations, batch_size)?;
+                for (index, search) in searches.iter_mut().enumerate() {
+                    if search.root_position().outcome().is_some() {
+                        continue;
+                    }
+                    let action = search
+                        .best_action()
+                        .ok_or("search produced no legal action")?;
+                    if index == 0 {
+                        first_game_actions.push(Board::action_index(action));
+                    }
+                    assert!(search.advance(action));
+                }
+            }
+            let draws = searches
+                .iter()
+                .filter(|search| {
+                    search.root_position().outcome() == Some(etive::game::Outcome::Draw)
+                })
+                .count();
+            let elapsed = start.elapsed();
+            let evaluations = evaluator.evaluations();
+            let batches = evaluator.batches();
+            println!("first game actions: {first_game_actions:?}");
+            println!("draws: {draws}/{games}");
+            println!(
+                "network evaluations: {evaluations} in {batches} batches ({:.1} average)",
+                evaluations as f64 / batches as f64
+            );
+            println!(
+                "search time: {elapsed:.3?} ({:.0} evaluations/s)",
+                evaluations as f64 / elapsed.as_secs_f64()
+            );
         }
     }
     Ok(())

@@ -5,8 +5,6 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rayon::prelude::*;
-
 use crate::evaluator::{BatchEvaluator, Evaluator};
 use crate::game::Game;
 
@@ -113,16 +111,6 @@ struct PendingEvaluation {
     node: usize,
 }
 
-enum BatchSelection<G> {
-    Idle,
-    Evaluate {
-        request: EvaluationRequest,
-        position: G,
-        output: usize,
-    },
-    Error(MctsError),
-}
-
 /// Runs equal simulation counts across independent trees using bounded batches.
 pub fn run_batched<G, E>(
     trees: &mut [Mcts<G>],
@@ -136,60 +124,32 @@ where
 {
     assert!(max_batch_size > 0, "maximum batch size must be positive");
     let mut positions: Vec<G> = Vec::with_capacity(trees.len());
-    let mut selections = (0..trees.len())
-        .map(|_| BatchSelection::Idle)
-        .collect::<Vec<_>>();
+    let mut requests: Vec<(usize, EvaluationRequest)> = Vec::with_capacity(trees.len());
     let mut policy_logits = Vec::new();
     let mut values = Vec::new();
 
     for _ in 0..simulations {
         positions.clear();
-        trees
-            .par_iter_mut()
-            .zip(selections.par_iter_mut())
-            .for_each(|(tree, selection)| {
-                *selection = if tree.root_position().outcome().is_some() {
-                    BatchSelection::Idle
-                } else {
-                    match tree.select() {
-                        Ok(Selection::Terminal) => BatchSelection::Idle,
-                        Ok(Selection::Evaluate { request, position }) => BatchSelection::Evaluate {
-                            request,
-                            position: *position,
-                            output: 0,
-                        },
-                        Err(error) => BatchSelection::Error(error),
+        requests.clear();
+        for tree_index in 0..trees.len() {
+            if trees[tree_index].root_position().outcome().is_some() {
+                continue;
+            }
+            let selection = match trees[tree_index].select() {
+                Ok(selection) => selection,
+                Err(error) => {
+                    for &(selected_tree, request) in &requests {
+                        trees[selected_tree].cancel(request);
                     }
-                };
-            });
-
-        if let Some(index) = selections
-            .iter()
-            .position(|selection| matches!(selection, BatchSelection::Error(_)))
-        {
-            trees
-                .par_iter_mut()
-                .zip(selections.par_iter())
-                .for_each(|(tree, selection)| {
-                    if let BatchSelection::Evaluate { request, .. } = selection {
-                        tree.cancel(*request);
-                    }
-                });
-            let BatchSelection::Error(error) =
-                std::mem::replace(&mut selections[index], BatchSelection::Idle)
-            else {
-                unreachable!()
+                    return Err(SearchError::Mcts(error));
+                }
             };
-            return Err(SearchError::Mcts(error));
-        }
-
-        for selection in &mut selections {
-            if let BatchSelection::Evaluate {
-                position, output, ..
-            } = selection
-            {
-                *output = positions.len();
-                positions.push(*position);
+            match selection {
+                Selection::Terminal => {}
+                Selection::Evaluate { request, position } => {
+                    positions.push(*position);
+                    requests.push((tree_index, request));
+                }
             }
         }
         if positions.is_empty() {
@@ -205,51 +165,25 @@ where
                 &mut policy_logits[start * G::ACTION_COUNT..end * G::ACTION_COUNT],
                 &mut values[start..end],
             ) {
-                trees
-                    .par_iter_mut()
-                    .zip(selections.par_iter())
-                    .for_each(|(tree, selection)| {
-                        if let BatchSelection::Evaluate { request, .. } = selection {
-                            tree.cancel(*request);
-                        }
-                    });
+                for &(tree_index, request) in &requests {
+                    trees[tree_index].cancel(request);
+                }
                 return Err(SearchError::Evaluator(error));
             }
         }
 
-        trees
-            .par_iter_mut()
-            .zip(selections.par_iter_mut())
-            .for_each(|(tree, selection)| {
-                let pending = match selection {
-                    BatchSelection::Evaluate {
-                        request, output, ..
-                    } => Some((*request, *output)),
-                    _ => None,
-                };
-                if let Some((request, output)) = pending {
-                    let policy_start = output * G::ACTION_COUNT;
-                    *selection = match tree.complete(
-                        request,
-                        &policy_logits[policy_start..policy_start + G::ACTION_COUNT],
-                        values[output],
-                    ) {
-                        Ok(()) => BatchSelection::Idle,
-                        Err(error) => BatchSelection::Error(error),
-                    };
+        for (index, &(tree_index, request)) in requests.iter().enumerate() {
+            let policy_start = index * G::ACTION_COUNT;
+            if let Err(error) = trees[tree_index].complete(
+                request,
+                &policy_logits[policy_start..policy_start + G::ACTION_COUNT],
+                values[index],
+            ) {
+                for &(waiting_tree, waiting_request) in &requests[index + 1..] {
+                    trees[waiting_tree].cancel(waiting_request);
                 }
-            });
-
-        if let Some(index) = selections
-            .iter()
-            .position(|selection| matches!(selection, BatchSelection::Error(_)))
-        {
-            let BatchSelection::Error(error) =
-                std::mem::replace(&mut selections[index], BatchSelection::Idle)
-            else {
-                unreachable!()
-            };
-            return Err(SearchError::Mcts(error));
+                return Err(SearchError::Mcts(error));
+            }
         }
     }
     Ok(())

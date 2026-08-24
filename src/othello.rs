@@ -2,6 +2,7 @@
 
 use std::iter::FusedIterator;
 
+pub mod actors;
 mod bitboard;
 mod board;
 mod movegen;

@@ -3,10 +3,8 @@ use std::time::Instant;
 use candle_core::{Device, Tensor};
 use clap::{Parser, Subcommand};
 use etive::evaluator::OthelloCandleEvaluator;
-use etive::game::Game;
-use etive::mcts::{Mcts, MctsConfig, run_batched};
+use etive::othello::actors::{ActorConfig, run as run_actors};
 use etive::othello::{Board, perft};
-use rayon::prelude::*;
 
 mod gtp;
 
@@ -37,6 +35,9 @@ enum Command {
         /// Maximum positions in one Candle invocation.
         #[arg(long, default_value_t = 64)]
         batch_size: usize,
+        /// Persistent game-owning actor threads.
+        #[arg(long)]
+        workers: Option<usize>,
     },
     /// Count opening-position leaves.
     Perft {
@@ -72,72 +73,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             seed,
             games,
             batch_size,
+            workers,
         } => {
             if simulations == 0 || games == 0 || batch_size == 0 {
                 return Err("simulations, games, and batch size must be greater than zero".into());
             }
             let device = candle_device()?;
-            let mut evaluator = OthelloCandleEvaluator::new(device, seed)?;
-            let mut searches = (0..games)
-                .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
-                .collect::<Vec<_>>();
-            let mut actions = vec![None; games];
-            let mut first_game_actions = Vec::new();
+            let evaluator = OthelloCandleEvaluator::new(device, seed)?;
+            let workers = workers.unwrap_or_else(default_actor_workers);
             let start = Instant::now();
-            while searches
-                .par_iter()
-                .any(|search| search.root_position().outcome().is_none())
-            {
-                run_batched(&mut searches, &mut evaluator, simulations, batch_size)?;
-                searches
-                    .par_iter()
-                    .zip(actions.par_iter_mut())
-                    .for_each(|(search, action)| {
-                        *action = if search.root_position().outcome().is_none() {
-                            search.best_action()
-                        } else {
-                            None
-                        };
-                    });
-                if searches.iter().zip(&actions).any(|(search, action)| {
-                    search.root_position().outcome().is_none() && action.is_none()
-                }) {
-                    return Err("search produced no legal action".into());
-                }
-                if let Some(action) = actions[0] {
-                    first_game_actions.push(Board::action_index(action));
-                }
-                searches
-                    .par_iter_mut()
-                    .zip(actions.par_iter())
-                    .for_each(|(search, &action)| {
-                        if let Some(action) = action {
-                            assert!(search.advance(action));
-                        }
-                    });
-            }
-            let draws = searches
-                .par_iter()
-                .filter(|search| {
-                    search.root_position().outcome() == Some(etive::game::Outcome::Draw)
-                })
-                .count();
+            let result = run_actors(
+                evaluator,
+                ActorConfig {
+                    games,
+                    simulations,
+                    workers,
+                    inference_batch_size: batch_size,
+                },
+            )?;
             let elapsed = start.elapsed();
-            let evaluations = evaluator.evaluations();
-            let batches = evaluator.batches();
-            println!("first game actions: {first_game_actions:?}");
-            println!("draws: {draws}/{games}");
+            println!("first game actions: {:?}", result.first_game_actions);
+            println!("draws: {}/{games}", result.draws);
             println!(
-                "network evaluations: {evaluations} in {batches} batches ({:.1} average)",
-                evaluations as f64 / batches as f64
+                "network evaluations: {} in {} batches ({:.1} average)",
+                result.evaluations,
+                result.batches,
+                result.evaluations as f64 / result.batches as f64
             );
             println!(
                 "search time: {elapsed:.3?} ({:.0} evaluations/s)",
-                evaluations as f64 / elapsed.as_secs_f64()
+                result.evaluations as f64 / elapsed.as_secs_f64()
             );
         }
     }
     Ok(())
+}
+
+fn default_actor_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|threads| threads.get().saturating_sub(1).clamp(1, 7))
+        .unwrap_or(1)
 }
 
 fn candle_device() -> candle_core::Result<Device> {

@@ -16,6 +16,7 @@ metal = ["candle-core/metal", "candle-nn/metal"]
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
 clap = { version = "4.5.46", features = ["derive"] }
+crossbeam-channel = "0.5.15"
 rayon = "1.11.0"
 
 [dev-dependencies]

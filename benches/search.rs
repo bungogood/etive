@@ -49,7 +49,7 @@ fn search(c: &mut Criterion) {
     }
 
     let mut othello_candle = OthelloCandleEvaluator::new(device.clone(), 7).unwrap();
-    for batch_size in [1_usize, 8, 32, 64, 128, 256, 512, 1_024] {
+    for batch_size in [1_usize, 8, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096] {
         let positions = vec![othello::Board::default(); batch_size];
         let mut policies = vec![0.0; batch_size * othello::Board::ACTION_COUNT];
         let mut values = vec![0.0; batch_size];

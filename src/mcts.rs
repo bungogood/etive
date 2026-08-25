@@ -1,7 +1,5 @@
 //! Arena-backed PUCT Monte Carlo tree search with split-phase evaluation.
 
-use std::error::Error;
-use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -33,53 +31,28 @@ pub struct ActionStats<A> {
     pub value: f32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MctsError {
+    #[error("an evaluation is already pending")]
     EvaluationPending,
+    #[error("no evaluation is pending")]
     NoEvaluationPending,
+    #[error("evaluation request is stale")]
     StaleRequest,
+    #[error("evaluator returned invalid policy logits")]
     InvalidPolicy,
+    #[error("evaluator returned invalid value {0}")]
     InvalidValue(f32),
+    #[error("non-terminal position has no legal actions")]
     NoLegalActions,
 }
 
-impl fmt::Display for MctsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EvaluationPending => f.write_str("an evaluation is already pending"),
-            Self::NoEvaluationPending => f.write_str("no evaluation is pending"),
-            Self::StaleRequest => f.write_str("evaluation request is stale"),
-            Self::InvalidPolicy => f.write_str("evaluator returned invalid policy logits"),
-            Self::InvalidValue(value) => write!(f, "evaluator returned invalid value {value}"),
-            Self::NoLegalActions => f.write_str("non-terminal position has no legal actions"),
-        }
-    }
-}
-
-impl Error for MctsError {}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SearchError<E> {
-    Evaluator(E),
-    Mcts(MctsError),
-}
-
-impl<E: fmt::Display> fmt::Display for SearchError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Evaluator(error) => write!(f, "evaluator failed: {error}"),
-            Self::Mcts(error) => error.fmt(f),
-        }
-    }
-}
-
-impl<E: Error + 'static> Error for SearchError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Evaluator(error) => Some(error),
-            Self::Mcts(error) => Some(error),
-        }
-    }
+    #[error("evaluator failed: {0}")]
+    Evaluator(#[source] E),
+    #[error(transparent)]
+    Mcts(#[from] MctsError),
 }
 
 /// Opaque identity for one selected leaf awaiting evaluation.

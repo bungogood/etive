@@ -1,12 +1,10 @@
 //! Persistent self-play actors feeding one batched inference owner.
 
 use std::collections::HashSet;
-use std::error::Error;
-use std::fmt;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, bounded};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma};
@@ -46,35 +44,18 @@ pub struct SelfPlaySample {
     pub game: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ActorError {
+    #[error("actor configuration must be positive")]
     InvalidConfig,
-    Evaluator(candle_core::Error),
-    Mcts(MctsError),
+    #[error("evaluator failed: {0}")]
+    Evaluator(#[source] candle_core::Error),
+    #[error(transparent)]
+    Mcts(#[from] MctsError),
+    #[error("inference thread stopped")]
     InferenceStopped,
+    #[error("actor thread panicked")]
     WorkerPanicked,
-}
-
-impl fmt::Display for ActorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidConfig => formatter.write_str("actor configuration must be positive"),
-            Self::Evaluator(error) => write!(formatter, "evaluator failed: {error}"),
-            Self::Mcts(error) => error.fmt(formatter),
-            Self::InferenceStopped => formatter.write_str("inference thread stopped"),
-            Self::WorkerPanicked => formatter.write_str("actor thread panicked"),
-        }
-    }
-}
-
-impl Error for ActorError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Evaluator(error) => Some(error),
-            Self::Mcts(error) => Some(error),
-            _ => None,
-        }
-    }
 }
 
 struct InferenceRequest {
@@ -146,12 +127,13 @@ pub fn run(
     }
 
     let worker_count = config.workers.min(config.games);
-    let (request_sender, request_receiver) = bounded(config.inference_batch_size.saturating_mul(2));
+    let (request_sender, request_receiver) =
+        sync_channel(config.inference_batch_size.saturating_mul(2));
     let mut response_senders = Vec::with_capacity(worker_count);
     let mut response_receivers = Vec::with_capacity(worker_count);
     for worker in 0..worker_count {
         let game_count = shard_len(config.games, worker_count, worker);
-        let (sender, receiver) = bounded(game_count.max(1));
+        let (sender, receiver) = sync_channel(game_count.max(1));
         response_senders.push(sender);
         response_receivers.push(receiver);
     }
@@ -237,7 +219,7 @@ fn run_inference(
     mut evaluator: OthelloCandleEvaluator,
     batch_size: usize,
     requests: Receiver<InferenceRequest>,
-    responses: Vec<Sender<InferenceResponse>>,
+    responses: Vec<SyncSender<InferenceResponse>>,
 ) -> Result<(OthelloCandleEvaluator, u64, u64), ActorError> {
     let mut batch = InferenceBatch::new(batch_size);
 
@@ -247,8 +229,7 @@ fn run_inference(
         while !batch.is_full() {
             match requests.recv_timeout(Duration::from_micros(100)) {
                 Ok(request) => push_inference_request(&mut batch, request),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
         batch
@@ -289,7 +270,7 @@ fn push_inference_request(
 
 fn run_worker(
     config: WorkerConfig,
-    requests: Sender<InferenceRequest>,
+    requests: SyncSender<InferenceRequest>,
     responses: Receiver<InferenceResponse>,
 ) -> Result<WorkerResult, ActorError> {
     let mut random = StdRng::seed_from_u64(config.seed);

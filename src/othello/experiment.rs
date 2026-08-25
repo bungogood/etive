@@ -1,9 +1,11 @@
 //! TOML-configured, resumable Othello self-play experiments.
 
+mod replay;
+
 use std::collections::VecDeque;
 use std::error::Error;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,12 +15,12 @@ use serde::{Deserialize, Serialize};
 use super::actors::{ActorConfig, SelfPlaySample, run as run_actors};
 use super::evaluation::{EvalConfig, evaluate};
 use super::training::{TrainingSession, evaluate_loss};
-use super::{BitBoard, Board, Color};
 use crate::evaluator::OthelloCandleEvaluator;
-use crate::game::Outcome;
 use crate::model::OthelloNetwork;
 
-const REPLAY_MAGIC: &[u8; 8] = b"ETRP0001";
+use replay::{
+    atomic_replay_save, load_replay, read_replay, replay_path, trim_replay, validation_replay_path,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -479,124 +481,6 @@ fn clean_output(output: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn trim_replay(replay: &mut VecDeque<Vec<SelfPlaySample>>, maximum: usize) {
-    let mut samples = replay.iter().map(Vec::len).sum::<usize>();
-    while samples > maximum && replay.len() > 1 {
-        samples -= replay.pop_front().expect("non-empty replay").len();
-    }
-}
-
-fn load_replay(
-    output: &Path,
-    generation: usize,
-    maximum: usize,
-) -> Result<VecDeque<Vec<SelfPlaySample>>, Box<dyn Error>> {
-    let mut replay = VecDeque::new();
-    let mut samples = 0;
-    for generation in (1..=generation).rev() {
-        let path = replay_path(output, generation);
-        if !path.exists() {
-            continue;
-        }
-        let shard = read_replay(&path)?;
-        samples += shard.len();
-        replay.push_front(shard);
-        if samples >= maximum {
-            break;
-        }
-    }
-    trim_replay(&mut replay, maximum);
-    Ok(replay)
-}
-
-fn atomic_replay_save(samples: &[SelfPlaySample], path: &Path) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    let mut writer = BufWriter::new(File::create(&temporary)?);
-    writer.write_all(REPLAY_MAGIC)?;
-    writer.write_all(&(samples.len() as u64).to_le_bytes())?;
-    for sample in samples {
-        writer.write_all(&sample.position.discs(Color::Black).0.to_le_bytes())?;
-        writer.write_all(&sample.position.discs(Color::White).0.to_le_bytes())?;
-        writer.write_all(&[match sample.position.side_to_move() {
-            Color::Black => 0,
-            Color::White => 1,
-        }])?;
-        for probability in sample.policy {
-            writer.write_all(&probability.to_le_bytes())?;
-        }
-        writer.write_all(&[match sample.outcome {
-            Outcome::Loss => 0,
-            Outcome::Draw => 1,
-            Outcome::Win => 2,
-        }])?;
-        writer.write_all(&sample.game.to_le_bytes())?;
-    }
-    writer.flush()?;
-    drop(writer);
-    fs::rename(temporary, path)?;
-    Ok(())
-}
-
-fn read_replay(path: &Path) -> Result<Vec<SelfPlaySample>, Box<dyn Error>> {
-    let mut reader = BufReader::new(File::open(path)?);
-    let mut magic = [0; 8];
-    reader.read_exact(&mut magic)?;
-    if &magic != REPLAY_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid replay header").into());
-    }
-    let count = read_u64(&mut reader)? as usize;
-    let mut samples = Vec::with_capacity(count);
-    for _ in 0..count {
-        let black = read_u64(&mut reader)?;
-        let white = read_u64(&mut reader)?;
-        let side = match read_u8(&mut reader)? {
-            0 => Color::Black,
-            1 => Color::White,
-            _ => return Err(invalid_replay("invalid side to move")),
-        };
-        let position = Board::from_discs(BitBoard(black), BitBoard(white), side)?;
-        let mut policy = [0.0; 65];
-        for probability in &mut policy {
-            *probability = read_f32(&mut reader)?;
-        }
-        let outcome = match read_u8(&mut reader)? {
-            0 => Outcome::Loss,
-            1 => Outcome::Draw,
-            2 => Outcome::Win,
-            _ => return Err(invalid_replay("invalid outcome")),
-        };
-        samples.push(SelfPlaySample {
-            position,
-            policy,
-            outcome,
-            game: read_u64(&mut reader)?,
-        });
-    }
-    Ok(samples)
-}
-
-fn read_u8(reader: &mut impl Read) -> io::Result<u8> {
-    let mut bytes = [0];
-    reader.read_exact(&mut bytes)?;
-    Ok(bytes[0])
-}
-
-fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
-    let mut bytes = [0; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
-fn read_f32(reader: &mut impl Read) -> io::Result<f32> {
-    let mut bytes = [0; 4];
-    reader.read_exact(&mut bytes)?;
-    Ok(f32::from_le_bytes(bytes))
-}
-
-fn invalid_replay(message: &str) -> Box<dyn Error> {
-    io::Error::new(io::ErrorKind::InvalidData, message).into()
-}
-
 fn write_metrics_header(path: &Path) -> io::Result<()> {
     fs::write(
         path,
@@ -670,21 +554,11 @@ fn optimizer_path(output: &Path, generation: usize) -> PathBuf {
     output.join(format!("generation-{generation:04}-optimizer.safetensors"))
 }
 
-fn replay_path(output: &Path, generation: usize) -> PathBuf {
-    output
-        .join("replay")
-        .join(format!("generation-{generation:04}.bin"))
-}
-
-fn validation_replay_path(output: &Path, generation: usize) -> PathBuf {
-    output
-        .join("replay")
-        .join(format!("generation-{generation:04}-validation.bin"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::Outcome;
+    use crate::othello::Board;
 
     const CONFIG: &str = r#"
 output = "checkpoints/run"
@@ -749,33 +623,6 @@ seed = 4242
     }
 
     #[test]
-    fn replay_round_trips() {
-        let path = std::env::temp_dir().join(format!(
-            "etive-replay-{}-{}.bin",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let mut policy = [0.0; 65];
-        policy[19] = 1.0;
-        let samples = [SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Win,
-            game: 42,
-        }];
-
-        atomic_replay_save(&samples, &path).unwrap();
-        let loaded = read_replay(&path).unwrap();
-        fs::remove_file(path).unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].position, samples[0].position);
-        assert_eq!(loaded[0].policy, samples[0].policy);
-        assert_eq!(loaded[0].outcome, Outcome::Win);
-        assert_eq!(loaded[0].game, 42);
-    }
-
-    #[test]
     fn recovery_requires_a_matching_committed_manifest() {
         let output = std::env::temp_dir().join(format!("etive-recovery-{}", std::process::id()));
         if output.exists() {
@@ -786,9 +633,11 @@ seed = 4242
         let manifest_path = output.join("pending-self-play.toml");
         let training_path = replay_path(&output, 1);
         let validation_path = validation_replay_path(&output, 1);
+        let mut policy = [0.0; 65];
+        policy[19] = 1.0;
         let sample = SelfPlaySample {
             position: Board::default(),
-            policy: [0.0; 65],
+            policy,
             outcome: Outcome::Draw,
             game: 1,
         };

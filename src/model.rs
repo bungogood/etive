@@ -1,7 +1,11 @@
 //! Candle policy/value models.
 
+use std::collections::HashMap;
+
 use candle_core::{DType, Device, Result, Tensor, Var};
-use candle_nn::{Conv2d, Conv2dConfig, Init, Linear, Module, VarBuilder, VarMap, conv2d, linear};
+use candle_nn::{
+    Conv2d, Conv2dConfig, GroupNorm, Linear, Module, VarBuilder, VarMap, conv2d, group_norm, linear,
+};
 
 const TIC_TAC_TOE_INPUTS: usize = 18;
 const TIC_TAC_TOE_HIDDEN: usize = 64;
@@ -74,95 +78,137 @@ impl TicTacToeNetwork {
 
 struct ResidualBlock {
     conv1: Conv2d,
-    norm1: ChannelGroupNorm,
+    norm1: GroupNorm,
     conv2: Conv2d,
-    norm2: ChannelGroupNorm,
+    norm2: GroupNorm,
 }
 
-struct ChannelGroupNorm {
-    weight: Tensor,
-    bias: Tensor,
-    groups: usize,
-    eps: f64,
-}
-
-/// A residual policy/value network for the 8x8 Othello board.
-pub struct OthelloNetwork {
+struct OthelloModel {
     stem: Conv2d,
-    stem_norm: ChannelGroupNorm,
+    stem_norm: GroupNorm,
     blocks: Vec<ResidualBlock>,
     policy_conv: Conv2d,
     policy: Linear,
     value_conv: Conv2d,
     value_hidden: Linear,
     value: Linear,
+}
+
+/// A residual policy/value network for the 8x8 Othello board.
+pub struct OthelloNetwork {
+    model: OthelloModel,
     variables: VarMap,
+    device: Device,
+}
+
+fn build_othello_model(vb: VarBuilder<'_>) -> Result<OthelloModel> {
+    let padded = Conv2dConfig {
+        padding: 1,
+        ..Conv2dConfig::default()
+    };
+    let stem = conv2d(2, OTHELLO_CHANNELS, 3, padded, vb.pp("stem.conv"))?;
+    let stem_norm = group_norm(
+        OTHELLO_NORM_GROUPS,
+        OTHELLO_CHANNELS,
+        1e-5,
+        vb.pp("stem.norm"),
+    )?;
+    let mut blocks = Vec::with_capacity(OTHELLO_RESIDUAL_BLOCKS);
+    for block in 0..OTHELLO_RESIDUAL_BLOCKS {
+        let block_vb = vb.pp(format!("blocks.{block}"));
+        blocks.push(ResidualBlock {
+            conv1: conv2d(
+                OTHELLO_CHANNELS,
+                OTHELLO_CHANNELS,
+                3,
+                padded,
+                block_vb.pp("conv1"),
+            )?,
+            norm1: group_norm(
+                OTHELLO_NORM_GROUPS,
+                OTHELLO_CHANNELS,
+                1e-5,
+                block_vb.pp("norm1"),
+            )?,
+            conv2: conv2d(
+                OTHELLO_CHANNELS,
+                OTHELLO_CHANNELS,
+                3,
+                padded,
+                block_vb.pp("conv2"),
+            )?,
+            norm2: group_norm(
+                OTHELLO_NORM_GROUPS,
+                OTHELLO_CHANNELS,
+                1e-5,
+                block_vb.pp("norm2"),
+            )?,
+        });
+    }
+    let policy_conv = conv2d(
+        OTHELLO_CHANNELS,
+        2,
+        1,
+        Conv2dConfig::default(),
+        vb.pp("policy.conv"),
+    )?;
+    let policy = linear(2 * 8 * 8, OTHELLO_ACTIONS, vb.pp("policy.linear"))?;
+    let value_conv = conv2d(
+        OTHELLO_CHANNELS,
+        1,
+        1,
+        Conv2dConfig::default(),
+        vb.pp("value.conv"),
+    )?;
+    let value_hidden = linear(8 * 8, OTHELLO_CHANNELS, vb.pp("value.hidden"))?;
+    let value = linear(OTHELLO_CHANNELS, 1, vb.pp("value.output"))?;
+
+    Ok(OthelloModel {
+        stem,
+        stem_norm,
+        blocks,
+        policy_conv,
+        policy,
+        value_conv,
+        value_hidden,
+        value,
+    })
+}
+
+impl OthelloModel {
+    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+        let batch = input.dim(0)?;
+        let mut hidden = self.stem_norm.forward(&self.stem.forward(input)?)?.relu()?;
+        for block in &self.blocks {
+            let residual = hidden.clone();
+            hidden = block
+                .norm1
+                .forward(&block.conv1.forward(&hidden)?)?
+                .relu()?;
+            hidden = block.norm2.forward(&block.conv2.forward(&hidden)?)?;
+            hidden = (&hidden + &residual)?.relu()?;
+        }
+        let policy = self
+            .policy_conv
+            .forward(&hidden)?
+            .relu()?
+            .reshape((batch, 2 * 8 * 8))?;
+        let policy = self.policy.forward(&policy)?;
+        let value = self
+            .value_conv
+            .forward(&hidden)?
+            .relu()?
+            .reshape((batch, 8 * 8))?;
+        let value = self.value_hidden.forward(&value)?.relu()?;
+        let value = self.value.forward(&value)?.tanh()?;
+        Ok((policy, value))
+    }
 }
 
 impl OthelloNetwork {
     pub fn new(device: &Device, seed: u64) -> Result<Self> {
         let mut variables = VarMap::new();
-        let vb = VarBuilder::from_varmap(&variables, DType::F32, device);
-        let padded = Conv2dConfig {
-            padding: 1,
-            ..Conv2dConfig::default()
-        };
-        let stem = conv2d(2, OTHELLO_CHANNELS, 3, padded, vb.pp("stem.conv"))?;
-        let stem_norm = ChannelGroupNorm::new(
-            OTHELLO_CHANNELS,
-            OTHELLO_NORM_GROUPS,
-            1e-5,
-            vb.pp("stem.norm"),
-        )?;
-        let mut blocks = Vec::with_capacity(OTHELLO_RESIDUAL_BLOCKS);
-        for block in 0..OTHELLO_RESIDUAL_BLOCKS {
-            let block_vb = vb.pp(format!("blocks.{block}"));
-            blocks.push(ResidualBlock {
-                conv1: conv2d(
-                    OTHELLO_CHANNELS,
-                    OTHELLO_CHANNELS,
-                    3,
-                    padded,
-                    block_vb.pp("conv1"),
-                )?,
-                norm1: ChannelGroupNorm::new(
-                    OTHELLO_CHANNELS,
-                    OTHELLO_NORM_GROUPS,
-                    1e-5,
-                    block_vb.pp("norm1"),
-                )?,
-                conv2: conv2d(
-                    OTHELLO_CHANNELS,
-                    OTHELLO_CHANNELS,
-                    3,
-                    padded,
-                    block_vb.pp("conv2"),
-                )?,
-                norm2: ChannelGroupNorm::new(
-                    OTHELLO_CHANNELS,
-                    OTHELLO_NORM_GROUPS,
-                    1e-5,
-                    block_vb.pp("norm2"),
-                )?,
-            });
-        }
-        let policy_conv = conv2d(
-            OTHELLO_CHANNELS,
-            2,
-            1,
-            Conv2dConfig::default(),
-            vb.pp("policy.conv"),
-        )?;
-        let policy = linear(2 * 8 * 8, OTHELLO_ACTIONS, vb.pp("policy.linear"))?;
-        let value_conv = conv2d(
-            OTHELLO_CHANNELS,
-            1,
-            1,
-            Conv2dConfig::default(),
-            vb.pp("value.conv"),
-        )?;
-        let value_hidden = linear(8 * 8, OTHELLO_CHANNELS, vb.pp("value.hidden"))?;
-        let value = linear(OTHELLO_CHANNELS, 1, vb.pp("value.output"))?;
+        let model = build_othello_model(VarBuilder::from_varmap(&variables, DType::F32, device))?;
 
         let mut random = SplitMix64(seed);
         initialize_conv2d(
@@ -231,44 +277,14 @@ impl OthelloNetwork {
         )?;
 
         Ok(Self {
-            stem,
-            stem_norm,
-            blocks,
-            policy_conv,
-            policy,
-            value_conv,
-            value_hidden,
-            value,
+            model,
             variables,
+            device: device.clone(),
         })
     }
 
     pub fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
-        let batch = input.dim(0)?;
-        let mut hidden = self.stem_norm.forward(&self.stem.forward(input)?)?.relu()?;
-        for block in &self.blocks {
-            let residual = hidden.clone();
-            hidden = block
-                .norm1
-                .forward(&block.conv1.forward(&hidden)?)?
-                .relu()?;
-            hidden = block.norm2.forward(&block.conv2.forward(&hidden)?)?;
-            hidden = (&hidden + &residual)?.relu()?;
-        }
-        let policy = self
-            .policy_conv
-            .forward(&hidden)?
-            .relu()?
-            .reshape((batch, 2 * 8 * 8))?;
-        let policy = self.policy.forward(&policy)?;
-        let value = self
-            .value_conv
-            .forward(&hidden)?
-            .relu()?
-            .reshape((batch, 8 * 8))?;
-        let value = self.value_hidden.forward(&value)?.relu()?;
-        let value = self.value.forward(&value)?.tanh()?;
-        Ok((policy, value))
+        self.model.forward(input)
     }
 
     pub const fn variables(&self) -> &VarMap {
@@ -300,75 +316,20 @@ impl OthelloNetwork {
     }
 
     pub fn detached(&self) -> Self {
+        let tensors = self
+            .named_variables()
+            .into_iter()
+            .map(|(name, variable)| (name, variable.as_tensor().detach()))
+            .collect::<HashMap<_, _>>();
+        let model =
+            build_othello_model(VarBuilder::from_tensors(tensors, DType::F32, &self.device))
+                .expect("detached model uses tensors from a valid Othello model");
         Self {
-            stem: detached_conv(&self.stem),
-            stem_norm: self.stem_norm.detached(),
-            blocks: self
-                .blocks
-                .iter()
-                .map(|block| ResidualBlock {
-                    conv1: detached_conv(&block.conv1),
-                    norm1: block.norm1.detached(),
-                    conv2: detached_conv(&block.conv2),
-                    norm2: block.norm2.detached(),
-                })
-                .collect(),
-            policy_conv: detached_conv(&self.policy_conv),
-            policy: detached_linear(&self.policy),
-            value_conv: detached_conv(&self.value_conv),
-            value_hidden: detached_linear(&self.value_hidden),
-            value: detached_linear(&self.value),
+            model,
             variables: VarMap::new(),
+            device: self.device.clone(),
         }
     }
-}
-
-impl ChannelGroupNorm {
-    fn new(channels: usize, groups: usize, eps: f64, vb: VarBuilder<'_>) -> Result<Self> {
-        Ok(Self {
-            weight: vb.get_with_hints(channels, "weight", Init::Const(1.0))?,
-            bias: vb.get_with_hints(channels, "bias", Init::Const(0.0))?,
-            groups,
-            eps,
-        })
-    }
-
-    fn detached(&self) -> Self {
-        Self {
-            weight: self.weight.detach(),
-            bias: self.bias.detach(),
-            groups: self.groups,
-            eps: self.eps,
-        }
-    }
-}
-
-impl Module for ChannelGroupNorm {
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let (batch, channels, height, width) = input.dims4()?;
-        let hidden = channels * height * width / self.groups;
-        let grouped = input.reshape((batch, self.groups, hidden))?;
-        let mean = (grouped.sum_keepdim(2)? / hidden as f64)?;
-        let centered = grouped.broadcast_sub(&mean)?;
-        let variance = (centered.sqr()?.sum_keepdim(2)? / hidden as f64)?;
-        let normalized = centered.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
-        normalized
-            .reshape((batch, channels, height, width))?
-            .broadcast_mul(&self.weight.reshape((1, channels, 1, 1))?)?
-            .broadcast_add(&self.bias.reshape((1, channels, 1, 1))?)
-    }
-}
-
-fn detached_conv(conv: &Conv2d) -> Conv2d {
-    Conv2d::new(
-        conv.weight().detach(),
-        conv.bias().map(Tensor::detach),
-        *conv.config(),
-    )
-}
-
-fn detached_linear(linear: &Linear) -> Linear {
-    Linear::new(linear.weight().detach(), linear.bias().map(Tensor::detach))
 }
 
 fn initialize_conv2d(
@@ -484,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn othello_network_has_policy_and_bounded_value_outputs() {
+    fn trainable_and_detached_othello_outputs_are_equal() {
         let input = Tensor::zeros((2, 2, 8, 8), DType::F32, &Device::Cpu).unwrap();
         let network = OthelloNetwork::new(&Device::Cpu, 7).unwrap();
         let (policy, value) = network.forward(&input).unwrap();
@@ -517,5 +478,88 @@ mod tests {
                 .into_iter()
                 .all(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
         );
+    }
+
+    #[test]
+    fn othello_parameter_names_match_checkpoint_schema() {
+        let network = OthelloNetwork::new(&Device::Cpu, 7).unwrap();
+        let mut expected = vec![
+            "stem.conv.bias".to_string(),
+            "stem.conv.weight".to_string(),
+            "stem.norm.bias".to_string(),
+            "stem.norm.weight".to_string(),
+        ];
+        for block in 0..OTHELLO_RESIDUAL_BLOCKS {
+            for layer in ["conv1", "conv2", "norm1", "norm2"] {
+                expected.push(format!("blocks.{block}.{layer}.bias"));
+                expected.push(format!("blocks.{block}.{layer}.weight"));
+            }
+        }
+        for layer in [
+            "policy.conv",
+            "policy.linear",
+            "value.conv",
+            "value.hidden",
+            "value.output",
+        ] {
+            expected.push(format!("{layer}.bias"));
+            expected.push(format!("{layer}.weight"));
+        }
+        expected.sort_unstable();
+
+        let actual = network
+            .named_variables()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(actual.len(), 94);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn detached_othello_model_observes_original_parameter_updates() {
+        let input = Tensor::zeros((1, 2, 8, 8), DType::F32, &Device::Cpu).unwrap();
+        let network = OthelloNetwork::new(&Device::Cpu, 7).unwrap();
+        let detached = network.detached();
+        let before = detached.forward(&input).unwrap().0;
+        let policy_bias = network
+            .named_variables()
+            .into_iter()
+            .find(|(name, _)| name == "policy.linear.bias")
+            .unwrap()
+            .1;
+        policy_bias
+            .set(&(policy_bias.as_tensor() + 1.0).unwrap())
+            .unwrap();
+        let after = detached.forward(&input).unwrap().0;
+
+        let difference = (after - before)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert!(
+            difference
+                .into_iter()
+                .all(|difference| (difference - 1.0).abs() < 1e-5)
+        );
+    }
+
+    #[test]
+    fn detached_othello_inference_does_not_gradient_model_parameters() {
+        let input = Tensor::zeros((1, 2, 8, 8), DType::F32, &Device::Cpu).unwrap();
+        let network = OthelloNetwork::new(&Device::Cpu, 7).unwrap();
+        let detached = network.detached();
+        let (policy, value) = detached.forward(&input).unwrap();
+        let loss = (policy.sum_all().unwrap() + value.sum_all().unwrap()).unwrap();
+        let gradients = loss.backward().unwrap();
+
+        for (name, variable) in network.named_variables() {
+            assert!(
+                gradients.get(&variable).is_none(),
+                "detached inference produced a gradient for {name}"
+            );
+        }
     }
 }

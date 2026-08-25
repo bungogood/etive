@@ -44,6 +44,7 @@ pub(crate) fn run_with_evaluator(
             search: Some(SearchEngine {
                 evaluator,
                 simulations,
+                tree: None,
             }),
         },
     )
@@ -77,6 +78,36 @@ struct Session {
 struct SearchEngine {
     evaluator: OthelloCandleEvaluator,
     simulations: u32,
+    tree: Option<Mcts<Board>>,
+}
+
+impl SearchEngine {
+    fn best_move(&mut self, board: Board) -> Result<Move, String> {
+        if self
+            .tree
+            .as_ref()
+            .is_some_and(|tree| tree.root_position() != &board)
+        {
+            self.tree = None;
+        }
+        let tree = self
+            .tree
+            .get_or_insert_with(|| Mcts::new(board, MctsConfig::default()));
+        tree.run(&mut self.evaluator, self.simulations)
+            .map_err(|error| error.to_string())?;
+        tree.best_action()
+            .ok_or_else(|| "search found no legal action".to_owned())
+    }
+
+    fn advance(&mut self, mv: Move) {
+        if !self.tree.as_mut().is_some_and(|tree| tree.advance(mv)) {
+            self.tree = None;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.tree = None;
+    }
 }
 
 impl Session {
@@ -143,6 +174,9 @@ impl Session {
     fn clear(&mut self) -> String {
         self.board = Board::default();
         self.history.clear();
+        if let Some(search) = &mut self.search {
+            search.reset();
+        }
         String::new()
     }
 
@@ -155,8 +189,7 @@ impl Session {
         if !self.board.is_legal(mv) {
             return Err("illegal move".to_owned());
         }
-        self.history.push(self.board);
-        self.board.play_unchecked(mv);
+        self.apply_move(mv);
         Ok(String::new())
     }
 
@@ -165,13 +198,7 @@ impl Session {
         self.require_turn(color)?;
 
         let mv = match &mut self.search {
-            Some(search) => {
-                let mut tree = Mcts::new(self.board, MctsConfig::default());
-                tree.run(&mut search.evaluator, search.simulations)
-                    .map_err(|error| error.to_string())?;
-                tree.best_action()
-                    .ok_or_else(|| "search found no legal action".to_owned())?
-            }
+            Some(search) => search.best_move(self.board)?,
             None => match self.board.legal_moves().into_iter().next() {
                 Some(square) => Move::Place(square),
                 None if self.board.is_pass_legal() => Move::Pass,
@@ -179,10 +206,17 @@ impl Session {
             },
         };
         if play_move {
-            self.history.push(self.board);
-            self.board.play_unchecked(mv);
+            self.apply_move(mv);
         }
         Ok(format_move(mv))
+    }
+
+    fn apply_move(&mut self, mv: Move) {
+        self.history.push(self.board);
+        self.board.play_unchecked(mv);
+        if let Some(search) = &mut self.search {
+            search.advance(mv);
+        }
     }
 
     fn require_turn(&self, color: &str) -> Result<(), String> {
@@ -196,6 +230,9 @@ impl Session {
     fn undo(&mut self, arguments: &[&str]) -> Result<String, String> {
         no_arguments(arguments)?;
         self.board = self.history.pop().ok_or_else(|| "cannot undo".to_owned())?;
+        if let Some(search) = &mut self.search {
+            search.reset();
+        }
         Ok(String::new())
     }
 
@@ -402,6 +439,7 @@ mod tests {
             search: Some(SearchEngine {
                 evaluator,
                 simulations: 2,
+                tree: None,
             }),
         };
 
@@ -410,5 +448,59 @@ mod tests {
 
         assert!(Board::default().is_legal(mv));
         assert_eq!(session.history, vec![Board::default()]);
+        assert_eq!(
+            session
+                .search
+                .as_ref()
+                .unwrap()
+                .tree
+                .as_ref()
+                .unwrap()
+                .root_position(),
+            &session.board
+        );
+    }
+
+    #[test]
+    fn checkpoint_search_advances_for_opponent_moves_and_resets_on_undo() {
+        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let mut session = Session {
+            board: Board::default(),
+            history: Vec::new(),
+            search: Some(SearchEngine {
+                evaluator,
+                simulations: 2,
+                tree: None,
+            }),
+        };
+
+        session.execute("genmove black").unwrap();
+        let opponent_move = session
+            .search
+            .as_ref()
+            .unwrap()
+            .tree
+            .as_ref()
+            .unwrap()
+            .best_action()
+            .unwrap();
+        session
+            .execute(&format!("play white {}", format_move(opponent_move)))
+            .unwrap();
+
+        assert_eq!(
+            session
+                .search
+                .as_ref()
+                .unwrap()
+                .tree
+                .as_ref()
+                .unwrap()
+                .root_position(),
+            &session.board
+        );
+
+        session.execute("undo").unwrap();
+        assert!(session.search.as_ref().unwrap().tree.is_none());
     }
 }

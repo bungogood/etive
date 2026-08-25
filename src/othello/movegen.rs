@@ -48,7 +48,7 @@ macro_rules! flips_on_axis {
 }
 
 #[inline(always)]
-pub(crate) fn legal_moves(player: u64, opponent: u64) -> u64 {
+pub(crate) fn legal_placements(player: u64, opponent: u64) -> u64 {
     let empty = !(player | opponent);
     let inner_opponent = opponent & INNER_FILES;
     moves_on_axis!(player, inner_opponent, empty, 1)
@@ -134,7 +134,7 @@ mod tests {
                 }
                 empty &= empty - 1;
             }
-            assert_eq!(legal_moves(player, opponent), expected);
+            assert_eq!(legal_placements(player, opponent), expected);
         }
     }
 }

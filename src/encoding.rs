@@ -43,7 +43,7 @@ impl StateEncoder<othello::Board> for OthelloEncodingV1 {
         encode_two_planes(
             game.discs(side).0,
             game.discs(!side).0,
-            othello::Square::NUM,
+            othello::Square::COUNT,
             output,
         );
     }

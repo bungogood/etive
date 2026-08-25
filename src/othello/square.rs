@@ -8,8 +8,8 @@ use super::BitBoard;
 pub struct Square(u8);
 
 impl Square {
-    pub const NUM: usize = 64;
-    pub const ALL: [Self; Self::NUM] = all_squares();
+    pub const COUNT: usize = 64;
+    pub const ALL: [Self; Self::COUNT] = all_squares();
 
     #[inline(always)]
     pub const fn new(file: u8, rank: u8) -> Option<Self> {
@@ -21,8 +21,12 @@ impl Square {
     }
 
     #[inline(always)]
-    pub const fn from_index(index: u8) -> Option<Self> {
-        if index < 64 { Some(Self(index)) } else { None }
+    pub const fn from_index(index: usize) -> Option<Self> {
+        if index < Self::COUNT {
+            Some(Self(index as u8))
+        } else {
+            None
+        }
     }
 
     #[inline(always)]
@@ -51,10 +55,10 @@ impl Square {
     }
 }
 
-const fn all_squares() -> [Square; Square::NUM] {
-    let mut squares = [Square(0); Square::NUM];
+const fn all_squares() -> [Square; Square::COUNT] {
+    let mut squares = [Square(0); Square::COUNT];
     let mut index = 0;
-    while index < Square::NUM {
+    while index < Square::COUNT {
         squares[index] = Square(index as u8);
         index += 1;
     }

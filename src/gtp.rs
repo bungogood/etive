@@ -1,9 +1,8 @@
 use std::io::{self, BufRead, Write};
-use std::str::FromStr;
 
 use etive::evaluator::OthelloCandleEvaluator;
 use etive::mcts::{Mcts, MctsConfig, SearchWorkspace};
-use etive::othello::{Board, Color, GameStatus, Move, Square};
+use etive::othello::{Board, Color, GameStatus, Move};
 
 macro_rules! commands {
     ($($variant:ident = $name:literal),+ $(,)?) => {
@@ -210,7 +209,9 @@ impl Session {
             return Err("expected color and move".to_owned());
         }
         self.require_turn(arguments[0])?;
-        let mv = parse_move(arguments[1])?;
+        let mv = arguments[1]
+            .parse::<Move>()
+            .map_err(|_| "invalid move".to_owned())?;
         self.apply_move(mv)?;
         Ok(String::new())
     }
@@ -224,7 +225,7 @@ impl Session {
 
         let mv = match &mut self.search {
             Some(search) => search.best_move(self.board)?,
-            None => match self.board.legal_moves().into_iter().next() {
+            None => match self.board.legal_placements().into_iter().next() {
                 Some(square) => Move::Place(square),
                 None if self.board.is_pass_legal() => Move::Pass,
                 None => return Ok("pass".to_owned()),
@@ -233,7 +234,7 @@ impl Session {
         if play_move {
             self.apply_move(mv)?;
         }
-        Ok(format_move(mv))
+        Ok(mv.to_string())
     }
 
     fn apply_move(&mut self, mv: Move) -> Result<(), String> {
@@ -358,23 +359,6 @@ fn parse_color(color: &str) -> Result<Color, String> {
     }
 }
 
-fn parse_move(value: &str) -> Result<Move, String> {
-    if value.eq_ignore_ascii_case("pass") {
-        Ok(Move::Pass)
-    } else {
-        Square::from_str(value)
-            .map(Move::Place)
-            .map_err(|_| "invalid move".to_owned())
-    }
-}
-
-fn format_move(mv: Move) -> String {
-    match mv {
-        Move::Place(square) => square.to_string(),
-        Move::Pass => "pass".to_owned(),
-    }
-}
-
 fn parse_komi(arguments: &[&str]) -> Result<String, String> {
     let komi = one_argument(arguments)?
         .parse::<f64>()
@@ -398,11 +382,12 @@ fn set_game(arguments: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::str::FromStr;
 
     use candle_core::Device;
 
     use super::*;
-    use etive::othello::BitBoard;
+    use etive::othello::{BitBoard, Square};
 
     fn exchange(input: &str) -> String {
         let mut output = Vec::new();
@@ -459,7 +444,7 @@ mod tests {
         assert_eq!(response.render(), "= pass\n\n");
         assert_eq!(session.board.side_to_move(), Color::Black);
         assert_eq!(
-            session.board.legal_moves(),
+            session.board.legal_placements(),
             Square::from_str("c1").unwrap().bitboard()
         );
     }
@@ -492,7 +477,7 @@ mod tests {
         };
 
         let response = session.execute("genmove black").unwrap();
-        let mv = parse_move(&response.body).unwrap();
+        let mv = response.body.parse::<Move>().unwrap();
 
         assert!(Board::default().is_legal(mv));
         assert_eq!(session.history, vec![Board::default()]);
@@ -536,7 +521,7 @@ mod tests {
             .best_action()
             .unwrap();
         session
-            .execute(&format!("play white {}", format_move(opponent_move)))
+            .execute(&format!("play white {opponent_move}"))
             .unwrap();
 
         assert_eq!(

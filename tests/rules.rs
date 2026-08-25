@@ -30,7 +30,7 @@ fn published_initial_position_perft() {
 fn initial_position_and_move_application_are_canonical() {
     let mut board = Board::default();
     let moves: Vec<_> = board
-        .legal_moves()
+        .legal_placements()
         .into_iter()
         .map(|square| square.to_string())
         .collect();
@@ -108,7 +108,7 @@ fn magpie_single_move_fixture() {
     let expected = BitBoard(0x0000_0000_0800_0000_u64.reverse_bits());
     let board = Board::from_discs(black, white, Color::Black).unwrap();
 
-    assert_eq!(board.legal_moves(), expected);
+    assert_eq!(board.legal_placements(), expected);
     assert_eq!(perft(&board, 8), 1);
 }
 
@@ -120,7 +120,7 @@ fn magpie_high_mobility_fixture() {
     let expected_perft = [1_u64, 34, 267, 7_671, 71_392, 1_783_477];
     let board = Board::from_discs(black, white, Color::Black).unwrap();
 
-    assert_eq!(board.legal_moves(), expected_moves);
+    assert_eq!(board.legal_placements(), expected_moves);
     for (depth, nodes) in expected_perft.into_iter().enumerate() {
         assert_eq!(perft(&board, depth as u8), nodes, "depth {depth}");
     }
@@ -133,7 +133,7 @@ fn one_move_can_flip_all_eight_directions() {
     let board = Board::from_discs(black, white, Color::Black).unwrap();
     let placed = square("d4");
 
-    assert!(board.legal_moves().has(placed));
+    assert!(board.legal_placements().has(placed));
     assert_eq!(board.flips(placed), white);
 }
 
@@ -144,7 +144,7 @@ fn corner_move_does_not_wrap_across_edges() {
     let board = Board::from_discs(black, white, Color::Black).unwrap();
     let placed = square("a1");
 
-    assert!(board.legal_moves().has(placed));
+    assert!(board.legal_placements().has(placed));
     assert_eq!(board.flips(placed), white);
 }
 
@@ -160,7 +160,7 @@ fn forced_pass_is_a_ply_and_double_pass_ends_the_game() {
     assert!(board.is_pass_legal());
     assert_eq!(perft(&board, 1), 1);
     board.play(Move::Pass);
-    assert_eq!(board.legal_moves(), square("c1").bitboard());
+    assert_eq!(board.legal_placements(), square("c1").bitboard());
     board.play(Move::Place(square("c1")));
     assert_eq!(board.status(), GameStatus::Won(Color::Black));
     assert!(!board.is_pass_legal());

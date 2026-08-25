@@ -1,9 +1,12 @@
 use std::fmt;
+use std::iter::FusedIterator;
 use std::ops::Not;
 use std::str::FromStr;
 
+use crate::game::Outcome;
+
 use super::movegen;
-use super::{BitBoard, Square};
+use super::{BitBoard, BitBoardIter, Square};
 
 const INITIAL_BLACK: u64 = 0x0000_0008_1000_0000;
 const INITIAL_WHITE: u64 = 0x0000_0010_0800_0000;
@@ -32,6 +35,67 @@ pub enum Move {
     Place(Square),
     Pass,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParseMoveError;
+
+impl fmt::Display for ParseMoveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("move must be pass or a square from a1 through h8")
+    }
+}
+
+impl std::error::Error for ParseMoveError {}
+
+impl FromStr for Move {
+    type Err = ParseMoveError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("pass") {
+            Ok(Self::Pass)
+        } else {
+            value.parse().map(Self::Place).map_err(|_| ParseMoveError)
+        }
+    }
+}
+
+impl fmt::Display for Move {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Place(square) => square.fmt(f),
+            Self::Pass => f.write_str("pass"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LegalActions {
+    placements: BitBoardIter,
+    pass: bool,
+}
+
+impl Iterator for LegalActions {
+    type Item = Move;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(square) = self.placements.next() {
+            return Some(Move::Place(square));
+        }
+        if self.pass {
+            self.pass = false;
+            return Some(Move::Pass);
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.placements.len() + usize::from(self.pass);
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for LegalActions {}
+impl FusedIterator for LegalActions {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameStatus {
@@ -114,13 +178,20 @@ impl Board {
     }
 
     #[inline(always)]
-    pub fn legal_moves(self) -> BitBoard {
-        BitBoard(movegen::legal_moves(self.player, self.opponent))
+    pub fn legal_placements(self) -> BitBoard {
+        BitBoard(movegen::legal_placements(self.player, self.opponent))
     }
 
     #[inline(always)]
-    pub fn has_legal_move(self) -> bool {
-        movegen::legal_moves(self.player, self.opponent) != 0
+    pub fn has_legal_placement(self) -> bool {
+        movegen::legal_placements(self.player, self.opponent) != 0
+    }
+
+    pub fn legal_actions(self) -> LegalActions {
+        LegalActions {
+            placements: self.legal_placements().into_iter(),
+            pass: self.is_pass_legal(),
+        }
     }
 
     /// Returns the discs that placing at `square` would flip.
@@ -141,11 +212,12 @@ impl Board {
 
     #[inline(always)]
     pub fn is_pass_legal(self) -> bool {
-        !self.has_legal_move() && movegen::legal_moves(self.opponent, self.player) != 0
+        !self.has_legal_placement() && movegen::legal_placements(self.opponent, self.player) != 0
     }
 
     pub fn status(self) -> GameStatus {
-        if self.has_legal_move() || movegen::legal_moves(self.opponent, self.player) != 0 {
+        if self.has_legal_placement() || movegen::legal_placements(self.opponent, self.player) != 0
+        {
             return GameStatus::Ongoing;
         }
         let black = self.discs(Color::Black).len();
@@ -160,8 +232,17 @@ impl Board {
     #[inline(always)]
     pub fn is_legal(self, mv: Move) -> bool {
         match mv {
-            Move::Place(square) => self.legal_moves().has(square),
+            Move::Place(square) => self.legal_placements().has(square),
             Move::Pass => self.is_pass_legal(),
+        }
+    }
+
+    pub fn outcome(self) -> Option<Outcome> {
+        match self.status() {
+            GameStatus::Ongoing => None,
+            GameStatus::Drawn => Some(Outcome::Draw),
+            GameStatus::Won(color) if color == self.side_to_move => Some(Outcome::Win),
+            GameStatus::Won(_) => Some(Outcome::Loss),
         }
     }
 

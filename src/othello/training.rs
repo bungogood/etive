@@ -472,7 +472,7 @@ fn arena_openings(games: usize, opening_plies: usize, seed: u64) -> Vec<(Board, 
             }
             let actions = board.legal_actions().collect::<Vec<_>>();
             let action = actions[random.random_range(0..actions.len())];
-            board.apply(action);
+            board.play_unchecked(action);
         }
         boards.push((board, Color::Black));
         boards.push((board, Color::White));
@@ -494,7 +494,7 @@ fn search_moves(
     workspace.run_batched(&mut searches, evaluator, simulations)?;
     for (&game_index, search) in game_indices.iter().zip(searches) {
         let action = search.best_action().ok_or("arena search found no action")?;
-        boards[game_index].0.apply(action);
+        boards[game_index].0.play_unchecked(action);
     }
     Ok(())
 }

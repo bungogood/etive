@@ -5,7 +5,7 @@ pub fn perft(board: &Board, depth: u8) -> u64 {
         return 1;
     }
 
-    let moves = board.legal_moves();
+    let moves = board.legal_placements();
     if moves.is_empty() {
         if board.status() != GameStatus::Ongoing {
             return 1;

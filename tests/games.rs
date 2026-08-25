@@ -66,6 +66,12 @@ fn tic_tac_toe_actions_round_trip_through_policy_indices() {
         assert_eq!(tic_tac_toe::Board::action_index(action), index);
     }
     assert_eq!(tic_tac_toe::Board::action_from_index(9), None);
+
+    let square = "b2".parse::<tic_tac_toe::Square>().unwrap();
+    assert_eq!(square.to_string(), "b2");
+    let mut played = board;
+    assert!(played.try_play(square).is_ok());
+    assert!(played.try_play(square).is_err());
 }
 
 #[test]
@@ -82,7 +88,7 @@ fn othello_search_expands_and_advances_through_a_forced_pass() {
     assert!(tree.advance(othello::Move::Pass));
     assert_eq!(tree.root_position().side_to_move(), othello::Color::Black);
     assert_eq!(
-        tree.root_position().legal_moves(),
+        tree.root_position().legal_placements(),
         othello::Square::new(2, 0).unwrap().bitboard()
     );
 

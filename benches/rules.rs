@@ -8,7 +8,7 @@ fn sample_positions() -> Vec<Board> {
     let mut positions = Vec::with_capacity(48);
     for ply in 0..48 {
         positions.push(board);
-        let moves = board.legal_moves();
+        let moves = board.legal_placements();
         if moves.is_empty() {
             if board.is_pass_legal() {
                 board.pass_unchecked();
@@ -29,7 +29,7 @@ fn rules(c: &mut Criterion) {
     c.bench_function("legal moves across game", |bencher| {
         bencher.iter(|| {
             for board in &positions {
-                black_box(black_box(*board).legal_moves());
+                black_box(black_box(*board).legal_placements());
             }
         });
     });
@@ -37,7 +37,7 @@ fn rules(c: &mut Criterion) {
     c.bench_function("flips across game", |bencher| {
         bencher.iter(|| {
             for board in &positions {
-                for square in board.legal_moves() {
+                for square in board.legal_placements() {
                     black_box(black_box(*board).flips(black_box(square)));
                 }
             }

@@ -316,19 +316,22 @@ impl OthelloNetwork {
     }
 
     pub fn detached(&self) -> Self {
+        self.detached_with_dtype(DType::F32)
+            .expect("detached model uses tensors from a valid Othello model")
+    }
+
+    pub fn detached_with_dtype(&self, dtype: DType) -> Result<Self> {
         let tensors = self
             .named_variables()
             .into_iter()
             .map(|(name, variable)| (name, variable.as_tensor().detach()))
             .collect::<HashMap<_, _>>();
-        let model =
-            build_othello_model(VarBuilder::from_tensors(tensors, DType::F32, &self.device))
-                .expect("detached model uses tensors from a valid Othello model");
-        Self {
+        let model = build_othello_model(VarBuilder::from_tensors(tensors, dtype, &self.device))?;
+        Ok(Self {
             model,
             variables: VarMap::new(),
             device: self.device.clone(),
-        }
+        })
     }
 }
 

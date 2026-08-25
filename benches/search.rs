@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use etive::encoding::{OthelloEncodingV1, StateEncoder, TicTacToeEncodingV1};
 use etive::evaluator::{
@@ -52,27 +52,30 @@ fn search(c: &mut Criterion) {
         );
     }
 
-    let mut othello_candle = OthelloCandleEvaluator::new(device.clone(), 7).unwrap();
-    for batch_size in [1_usize, 8, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096] {
-        let positions = vec![othello::Board::default(); batch_size];
-        let mut policies = vec![0.0; batch_size * othello::Board::ACTION_COUNT];
-        let mut values = vec![0.0; batch_size];
-        group.throughput(Throughput::Elements(batch_size as u64));
-        group.bench_with_input(
-            BenchmarkId::new("Othello Candle batch", batch_size),
-            &batch_size,
-            |bencher, _| {
-                bencher.iter(|| {
-                    othello_candle
-                        .evaluate_batch(
-                            black_box(&positions),
-                            black_box(&mut policies),
-                            black_box(&mut values),
-                        )
-                        .unwrap()
-                });
-            },
-        );
+    for (precision, dtype) in [("f32", DType::F32), ("f16", DType::F16)] {
+        let mut othello_candle =
+            OthelloCandleEvaluator::new_with_dtype(device.clone(), 7, dtype).unwrap();
+        for batch_size in [128_usize, 256, 512, 1_024, 2_048, 4_096] {
+            let positions = vec![othello::Board::default(); batch_size];
+            let mut policies = vec![0.0; batch_size * othello::Board::ACTION_COUNT];
+            let mut values = vec![0.0; batch_size];
+            group.throughput(Throughput::Elements(batch_size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(format!("Othello Candle {precision}"), batch_size),
+                &batch_size,
+                |bencher, _| {
+                    bencher.iter(|| {
+                        othello_candle
+                            .evaluate_batch(
+                                black_box(&positions),
+                                black_box(&mut policies),
+                                black_box(&mut values),
+                            )
+                            .unwrap()
+                    });
+                },
+            );
+        }
     }
 
     let batch_size = 128;

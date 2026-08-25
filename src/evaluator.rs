@@ -2,7 +2,7 @@
 
 use std::convert::Infallible;
 
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 
 use crate::encoding::{OthelloEncodingV1, StateEncoder, TicTacToeEncodingV1};
 use crate::game::Game;
@@ -217,6 +217,7 @@ impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeCandleEvaluator {
 pub struct OthelloCandleEvaluator {
     network: OthelloNetwork,
     device: Device,
+    dtype: DType,
     input: Vec<f32>,
     evaluations: u64,
     batches: u64,
@@ -224,18 +225,32 @@ pub struct OthelloCandleEvaluator {
 
 impl OthelloCandleEvaluator {
     pub fn new(device: Device, seed: u64) -> candle_core::Result<Self> {
+        Self::new_with_dtype(device, seed, DType::F32)
+    }
+
+    pub fn new_with_dtype(device: Device, seed: u64, dtype: DType) -> candle_core::Result<Self> {
         let network = OthelloNetwork::new(&device, seed)?;
-        Ok(Self::from_network(device, &network))
+        Self::from_network_with_dtype(device, &network, dtype)
     }
 
     pub fn from_network(device: Device, network: &OthelloNetwork) -> Self {
-        Self {
-            network: network.detached(),
+        Self::from_network_with_dtype(device, network, DType::F32)
+            .expect("FP32 inference supports a valid Othello model")
+    }
+
+    pub fn from_network_with_dtype(
+        device: Device,
+        network: &OthelloNetwork,
+        dtype: DType,
+    ) -> candle_core::Result<Self> {
+        Ok(Self {
+            network: network.detached_with_dtype(dtype)?,
             device,
+            dtype,
             input: vec![0.0; OthelloEncodingV1::encoded_len()],
             evaluations: 0,
             batches: 0,
-        }
+        })
     }
 
     pub const fn evaluations(&self) -> u64 {
@@ -268,11 +283,13 @@ impl BatchEvaluator<othello::Board> for OthelloCandleEvaluator {
         self.input
             .resize(games.len() * OthelloEncodingV1::encoded_len(), 0.0);
         OthelloEncodingV1.encode_batch(games, &mut self.input);
-        let input = Tensor::from_slice(&self.input, (games.len(), 2, 8, 8), &self.device)?;
+        let input = Tensor::from_slice(&self.input, (games.len(), 2, 8, 8), &self.device)?
+            .to_dtype(self.dtype)?;
         let (policy, value) = self.network.forward(&input)?;
         // One packed readback avoids synchronizing the accelerator separately
         // for policy and value tensors.
         let output = Tensor::cat(&[&policy, &value], 1)?
+            .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         let (rows, remainder) = output.as_chunks::<{ othello::Board::ACTION_COUNT + 1 }>();

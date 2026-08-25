@@ -193,6 +193,7 @@ impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeCandleEvaluator {
 /// Batched Candle evaluation for Othello search.
 pub struct OthelloCandleEvaluator {
     network: OthelloNetwork,
+    trainable_network: OthelloNetwork,
     device: Device,
     input: Vec<f32>,
     evaluations: u64,
@@ -202,13 +203,19 @@ pub struct OthelloCandleEvaluator {
 impl OthelloCandleEvaluator {
     pub fn new(device: Device, seed: u64) -> candle_core::Result<Self> {
         let network = OthelloNetwork::new(&device, seed)?;
-        Ok(Self {
-            network,
+        Ok(Self::from_network(device, network))
+    }
+
+    pub fn from_network(device: Device, network: OthelloNetwork) -> Self {
+        let inference_network = network.detached();
+        Self {
+            network: inference_network,
+            trainable_network: network,
             device,
             input: vec![0.0; OthelloEncodingV1::encoded_len()],
             evaluations: 0,
             batches: 0,
-        })
+        }
     }
 
     pub const fn evaluations(&self) -> u64 {
@@ -217,6 +224,10 @@ impl OthelloCandleEvaluator {
 
     pub const fn batches(&self) -> u64 {
         self.batches
+    }
+
+    pub fn into_network(self) -> OthelloNetwork {
+        self.trainable_network
     }
 }
 

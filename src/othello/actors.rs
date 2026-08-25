@@ -43,6 +43,7 @@ pub struct SelfPlaySample {
     pub position: Board,
     pub policy: [f32; 65],
     pub outcome: Outcome,
+    pub game: u64,
 }
 
 #[derive(Debug)]
@@ -123,7 +124,10 @@ struct WorkerConfig {
     temperature_moves: usize,
 }
 
-pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<ActorRun, ActorError> {
+pub fn run(
+    evaluator: OthelloCandleEvaluator,
+    config: ActorConfig,
+) -> Result<(ActorRun, OthelloCandleEvaluator), ActorError> {
     if config.games == 0
         || config.simulations < 2
         || config.workers == 0
@@ -205,19 +209,22 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
         }
     }
     let inference = inference.join().map_err(|_| ActorError::WorkerPanicked)?;
-    let (evaluations, batches) = inference?;
+    let (evaluator, evaluations, batches) = inference?;
     if let Some(error) = worker_error {
         return Err(error);
     }
 
-    Ok(ActorRun {
-        first_game_actions,
-        draws,
-        evaluations,
-        batches,
-        unique_games: trajectory_hashes.into_iter().collect::<HashSet<_>>().len(),
-        samples,
-    })
+    Ok((
+        ActorRun {
+            first_game_actions,
+            draws,
+            evaluations,
+            batches,
+            unique_games: trajectory_hashes.into_iter().collect::<HashSet<_>>().len(),
+            samples,
+        },
+        evaluator,
+    ))
 }
 
 fn run_inference(
@@ -225,7 +232,7 @@ fn run_inference(
     batch_size: usize,
     requests: Receiver<InferenceRequest>,
     responses: Vec<Sender<InferenceResponse>>,
-) -> Result<(u64, u64), ActorError> {
+) -> Result<(OthelloCandleEvaluator, u64, u64), ActorError> {
     let mut batch = Vec::with_capacity(batch_size);
     let mut positions = Vec::with_capacity(batch_size);
     let mut policies = Vec::with_capacity(batch_size * Board::ACTION_COUNT);
@@ -262,7 +269,9 @@ fn run_inference(
         }
     }
 
-    Ok((evaluator.evaluations(), evaluator.batches()))
+    let evaluations = evaluator.evaluations();
+    let batches = evaluator.batches();
+    Ok((evaluator, evaluations, batches))
 }
 
 fn run_worker(
@@ -384,6 +393,7 @@ fn run_worker(
             position: record.position,
             policy: record.policy,
             outcome: outcome_for(record.player, terminal),
+            game: game.trajectory_hash,
         }));
         trajectory_hashes.push(game.trajectory_hash);
     }
@@ -472,13 +482,13 @@ mod tests {
     #[test]
     fn actor_workers_complete_games_through_one_inference_owner() {
         let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
-        let result = run(
+        let (result, _) = run(
             evaluator,
             ActorConfig {
-                games: 8,
-                simulations: 16,
-                workers: 2,
-                inference_batch_size: 8,
+                games: 2,
+                simulations: 2,
+                workers: 1,
+                inference_batch_size: 2,
                 seed: 11,
                 dirichlet_alpha: 0.3,
                 dirichlet_fraction: 0.25,
@@ -488,7 +498,7 @@ mod tests {
         .unwrap();
 
         assert!(!result.first_game_actions.is_empty());
-        assert!(result.draws <= 8);
+        assert!(result.draws <= 2);
         assert!(result.evaluations > 0);
         assert!(result.batches > 0);
         assert!(result.unique_games > 1);

@@ -5,9 +5,11 @@ use std::iter::FusedIterator;
 pub mod actors;
 mod bitboard;
 mod board;
+pub mod experiment;
 mod movegen;
 mod perft;
 mod square;
+pub mod training;
 
 pub use bitboard::{BitBoard, BitBoardIter};
 pub use board::{Board, BoardError, Color, GameStatus, Move, ParseBoardError};

@@ -1,9 +1,13 @@
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use candle_core::{Device, Tensor};
 use clap::{Parser, Subcommand};
 use etive::evaluator::OthelloCandleEvaluator;
+use etive::model::OthelloNetwork;
 use etive::othello::actors::{ActorConfig, run as run_actors};
+use etive::othello::experiment;
+use etive::othello::training::{ArenaConfig, arena_with_progress};
 use etive::othello::{Board, perft};
 
 mod gtp;
@@ -17,10 +21,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Compare two Othello checkpoints with fixed-search games.
+    Arena {
+        /// Checkpoint for the previous network.
+        previous: PathBuf,
+        /// Checkpoint for the contender network.
+        contender: PathBuf,
+        /// Number of color-balanced games.
+        #[arg(long, default_value_t = 500)]
+        games: usize,
+        /// Simulations performed before each move.
+        #[arg(long, default_value_t = 128)]
+        simulations: u32,
+        /// Maximum positions in one network invocation.
+        #[arg(long, default_value_t = 4096)]
+        batch_size: usize,
+        /// Seeded random plies applied before measured play begins.
+        #[arg(long, default_value_t = 8)]
+        opening_plies: usize,
+        /// Reproducible opening-suite seed.
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+    },
     /// Verify Candle on the selected device.
     Candle,
     /// Run as a Go Text Protocol v2 Othello engine.
-    Gtp,
+    Gtp {
+        /// Trained checkpoint used for MCTS moves; omitted for rules-only mode.
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+        /// Simulations performed before each generated move.
+        #[arg(long, default_value_t = 128)]
+        simulations: u32,
+    },
     /// Play Othello games with random Candle evaluation and MCTS.
     Mcts {
         /// Simulations performed before each move.
@@ -48,6 +81,14 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         temperature_moves: usize,
     },
+    /// Run or resume a TOML-configured training experiment.
+    Learn {
+        /// Experiment TOML file.
+        config: PathBuf,
+        /// Resume the run recorded in the configured output directory.
+        #[arg(long)]
+        resume: bool,
+    },
     /// Count opening-position leaves.
     Perft {
         /// Search depth in plies.
@@ -58,6 +99,57 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::Arena {
+            previous,
+            contender,
+            games,
+            simulations,
+            batch_size,
+            opening_plies,
+            seed,
+        } => {
+            let device = candle_device()?;
+            let previous = OthelloNetwork::load(previous, &device)?;
+            let contender = OthelloNetwork::load(contender, &device)?;
+            let mut previous = OthelloCandleEvaluator::from_network(device.clone(), previous);
+            let mut contender = OthelloCandleEvaluator::from_network(device, contender);
+            let start = Instant::now();
+            let mut last_progress = Instant::now();
+            let result = arena_with_progress(
+                &mut contender,
+                &mut previous,
+                ArenaConfig {
+                    games,
+                    simulations,
+                    batch_size,
+                    opening_plies,
+                    seed,
+                },
+                |progress| {
+                    let elapsed = start.elapsed();
+                    if last_progress.elapsed() >= Duration::from_secs(5)
+                        || progress.completed == progress.total
+                    {
+                        eprintln!(
+                            "progress: {}/{} games, {} moves, {:.2} games/s, {:.0} evaluations/s",
+                            progress.completed,
+                            progress.total,
+                            progress.moves,
+                            progress.completed as f64 / elapsed.as_secs_f64(),
+                            progress.evaluations as f64 / elapsed.as_secs_f64()
+                        );
+                        last_progress = Instant::now();
+                    }
+                },
+            )?;
+            println!(
+                "arena: contender {} wins, previous {} wins, {} draws in {:.3?}",
+                result.trained_wins,
+                result.initial_wins,
+                result.draws,
+                start.elapsed()
+            );
+        }
         Command::Perft { depth } => {
             let board = Board::default();
             let start = Instant::now();
@@ -72,10 +164,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = tensor.sqr()?.sum_all()?.to_scalar::<f32>()?;
             println!("Candle smoke test passed on {device:?}: {result}");
         }
-        Command::Gtp => {
+        Command::Gtp {
+            checkpoint,
+            simulations,
+        } => {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
-            gtp::run(stdin.lock(), stdout.lock())?;
+            if let Some(path) = checkpoint {
+                if simulations < 2 {
+                    return Err("simulations must be at least two".into());
+                }
+                let device = candle_device()?;
+                let network = OthelloNetwork::load(path, &device)?;
+                let evaluator = OthelloCandleEvaluator::from_network(device, network);
+                gtp::run_with_evaluator(stdin.lock(), stdout.lock(), evaluator, simulations)?;
+            } else {
+                gtp::run(stdin.lock(), stdout.lock())?;
+            }
         }
         Command::Mcts {
             simulations,
@@ -97,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let evaluator = OthelloCandleEvaluator::new(device, seed)?;
             let workers = workers.unwrap_or_else(default_actor_workers);
             let start = Instant::now();
-            let result = run_actors(
+            let (result, _) = run_actors(
                 evaluator,
                 ActorConfig {
                     games,
@@ -128,6 +233,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "search time: {elapsed:.3?} ({:.0} evaluations/s)",
                 result.evaluations as f64 / elapsed.as_secs_f64()
             );
+        }
+        Command::Learn { config, resume } => {
+            experiment::run(config, candle_device()?, resume)?;
         }
     }
     Ok(())

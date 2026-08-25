@@ -1,12 +1,14 @@
 //! Candle policy/value models.
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig, Linear, Module, VarBuilder, VarMap, conv2d, linear};
+use candle_core::{DType, Device, Result, Tensor, Var};
+use candle_nn::{Conv2d, Conv2dConfig, Init, Linear, Module, VarBuilder, VarMap, conv2d, linear};
 
 const TIC_TAC_TOE_INPUTS: usize = 18;
 const TIC_TAC_TOE_HIDDEN: usize = 64;
 const TIC_TAC_TOE_ACTIONS: usize = 9;
-const OTHELLO_CHANNELS: usize = 64;
+const OTHELLO_CHANNELS: usize = 128;
+const OTHELLO_RESIDUAL_BLOCKS: usize = 10;
+const OTHELLO_NORM_GROUPS: usize = 8;
 const OTHELLO_ACTIONS: usize = 65;
 
 /// A small policy/value MLP for tic-tac-toe inference tests.
@@ -70,15 +72,31 @@ impl TicTacToeNetwork {
     }
 }
 
-/// A compact convolutional policy/value network for the 8x8 Othello board.
+struct ResidualBlock {
+    conv1: Conv2d,
+    norm1: ChannelGroupNorm,
+    conv2: Conv2d,
+    norm2: ChannelGroupNorm,
+}
+
+struct ChannelGroupNorm {
+    weight: Tensor,
+    bias: Tensor,
+    groups: usize,
+    eps: f64,
+}
+
+/// A residual policy/value network for the 8x8 Othello board.
 pub struct OthelloNetwork {
-    trunk: [Conv2d; 3],
+    stem: Conv2d,
+    stem_norm: ChannelGroupNorm,
+    blocks: Vec<ResidualBlock>,
     policy_conv: Conv2d,
     policy: Linear,
     value_conv: Conv2d,
     value_hidden: Linear,
     value: Linear,
-    _variables: VarMap,
+    variables: VarMap,
 }
 
 impl OthelloNetwork {
@@ -89,23 +107,45 @@ impl OthelloNetwork {
             padding: 1,
             ..Conv2dConfig::default()
         };
-        let trunk = [
-            conv2d(2, OTHELLO_CHANNELS, 3, padded, vb.pp("trunk.0"))?,
-            conv2d(
-                OTHELLO_CHANNELS,
-                OTHELLO_CHANNELS,
-                3,
-                padded,
-                vb.pp("trunk.1"),
-            )?,
-            conv2d(
-                OTHELLO_CHANNELS,
-                OTHELLO_CHANNELS,
-                3,
-                padded,
-                vb.pp("trunk.2"),
-            )?,
-        ];
+        let stem = conv2d(2, OTHELLO_CHANNELS, 3, padded, vb.pp("stem.conv"))?;
+        let stem_norm = ChannelGroupNorm::new(
+            OTHELLO_CHANNELS,
+            OTHELLO_NORM_GROUPS,
+            1e-5,
+            vb.pp("stem.norm"),
+        )?;
+        let mut blocks = Vec::with_capacity(OTHELLO_RESIDUAL_BLOCKS);
+        for block in 0..OTHELLO_RESIDUAL_BLOCKS {
+            let block_vb = vb.pp(format!("blocks.{block}"));
+            blocks.push(ResidualBlock {
+                conv1: conv2d(
+                    OTHELLO_CHANNELS,
+                    OTHELLO_CHANNELS,
+                    3,
+                    padded,
+                    block_vb.pp("conv1"),
+                )?,
+                norm1: ChannelGroupNorm::new(
+                    OTHELLO_CHANNELS,
+                    OTHELLO_NORM_GROUPS,
+                    1e-5,
+                    block_vb.pp("norm1"),
+                )?,
+                conv2: conv2d(
+                    OTHELLO_CHANNELS,
+                    OTHELLO_CHANNELS,
+                    3,
+                    padded,
+                    block_vb.pp("conv2"),
+                )?,
+                norm2: ChannelGroupNorm::new(
+                    OTHELLO_CHANNELS,
+                    OTHELLO_NORM_GROUPS,
+                    1e-5,
+                    block_vb.pp("norm2"),
+                )?,
+            });
+        }
         let policy_conv = conv2d(
             OTHELLO_CHANNELS,
             2,
@@ -127,31 +167,26 @@ impl OthelloNetwork {
         let mut random = SplitMix64(seed);
         initialize_conv2d(
             &mut variables,
-            "trunk.0",
+            "stem.conv",
             2,
             OTHELLO_CHANNELS,
             3,
             &mut random,
             device,
         )?;
-        initialize_conv2d(
-            &mut variables,
-            "trunk.1",
-            OTHELLO_CHANNELS,
-            OTHELLO_CHANNELS,
-            3,
-            &mut random,
-            device,
-        )?;
-        initialize_conv2d(
-            &mut variables,
-            "trunk.2",
-            OTHELLO_CHANNELS,
-            OTHELLO_CHANNELS,
-            3,
-            &mut random,
-            device,
-        )?;
+        for block in 0..OTHELLO_RESIDUAL_BLOCKS {
+            for conv in ["conv1", "conv2"] {
+                initialize_conv2d(
+                    &mut variables,
+                    &format!("blocks.{block}.{conv}"),
+                    OTHELLO_CHANNELS,
+                    OTHELLO_CHANNELS,
+                    3,
+                    &mut random,
+                    device,
+                )?;
+            }
+        }
         initialize_conv2d(
             &mut variables,
             "policy.conv",
@@ -196,21 +231,29 @@ impl OthelloNetwork {
         )?;
 
         Ok(Self {
-            trunk,
+            stem,
+            stem_norm,
+            blocks,
             policy_conv,
             policy,
             value_conv,
             value_hidden,
             value,
-            _variables: variables,
+            variables,
         })
     }
 
     pub fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
         let batch = input.dim(0)?;
-        let mut hidden = self.trunk[0].forward(input)?.relu()?;
-        for layer in &self.trunk[1..] {
-            hidden = layer.forward(&hidden)?.relu()?;
+        let mut hidden = self.stem_norm.forward(&self.stem.forward(input)?)?.relu()?;
+        for block in &self.blocks {
+            let residual = hidden.clone();
+            hidden = block
+                .norm1
+                .forward(&block.conv1.forward(&hidden)?)?
+                .relu()?;
+            hidden = block.norm2.forward(&block.conv2.forward(&hidden)?)?;
+            hidden = (&hidden + &residual)?.relu()?;
         }
         let policy = self
             .policy_conv
@@ -227,6 +270,105 @@ impl OthelloNetwork {
         let value = self.value.forward(&value)?.tanh()?;
         Ok((policy, value))
     }
+
+    pub const fn variables(&self) -> &VarMap {
+        &self.variables
+    }
+
+    pub fn named_variables(&self) -> Vec<(String, Var)> {
+        let variables = self.variables.data().lock().expect("variable map poisoned");
+        let mut variables = variables
+            .iter()
+            .map(|(name, variable)| (name.clone(), variable.clone()))
+            .collect::<Vec<_>>();
+        variables.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        variables
+    }
+
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.variables.save(path)
+    }
+
+    pub fn load(path: impl AsRef<std::path::Path>, device: &Device) -> Result<Self> {
+        let mut network = Self::new(device, 0)?;
+        network.variables.load(path)?;
+        Ok(network)
+    }
+
+    pub fn load_weights(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.variables.load(path)
+    }
+
+    pub fn detached(&self) -> Self {
+        Self {
+            stem: detached_conv(&self.stem),
+            stem_norm: self.stem_norm.detached(),
+            blocks: self
+                .blocks
+                .iter()
+                .map(|block| ResidualBlock {
+                    conv1: detached_conv(&block.conv1),
+                    norm1: block.norm1.detached(),
+                    conv2: detached_conv(&block.conv2),
+                    norm2: block.norm2.detached(),
+                })
+                .collect(),
+            policy_conv: detached_conv(&self.policy_conv),
+            policy: detached_linear(&self.policy),
+            value_conv: detached_conv(&self.value_conv),
+            value_hidden: detached_linear(&self.value_hidden),
+            value: detached_linear(&self.value),
+            variables: VarMap::new(),
+        }
+    }
+}
+
+impl ChannelGroupNorm {
+    fn new(channels: usize, groups: usize, eps: f64, vb: VarBuilder<'_>) -> Result<Self> {
+        Ok(Self {
+            weight: vb.get_with_hints(channels, "weight", Init::Const(1.0))?,
+            bias: vb.get_with_hints(channels, "bias", Init::Const(0.0))?,
+            groups,
+            eps,
+        })
+    }
+
+    fn detached(&self) -> Self {
+        Self {
+            weight: self.weight.detach(),
+            bias: self.bias.detach(),
+            groups: self.groups,
+            eps: self.eps,
+        }
+    }
+}
+
+impl Module for ChannelGroupNorm {
+    fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        let (batch, channels, height, width) = input.dims4()?;
+        let hidden = channels * height * width / self.groups;
+        let grouped = input.reshape((batch, self.groups, hidden))?;
+        let mean = (grouped.sum_keepdim(2)? / hidden as f64)?;
+        let centered = grouped.broadcast_sub(&mean)?;
+        let variance = (centered.sqr()?.sum_keepdim(2)? / hidden as f64)?;
+        let normalized = centered.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
+        normalized
+            .reshape((batch, channels, height, width))?
+            .broadcast_mul(&self.weight.reshape((1, channels, 1, 1))?)?
+            .broadcast_add(&self.bias.reshape((1, channels, 1, 1))?)
+    }
+}
+
+fn detached_conv(conv: &Conv2d) -> Conv2d {
+    Conv2d::new(
+        conv.weight().detach(),
+        conv.bias().map(Tensor::detach),
+        *conv.config(),
+    )
+}
+
+fn detached_linear(linear: &Linear) -> Linear {
+    Linear::new(linear.weight().detach(), linear.bias().map(Tensor::detach))
 }
 
 fn initialize_conv2d(
@@ -346,9 +488,26 @@ mod tests {
         let input = Tensor::zeros((2, 2, 8, 8), DType::F32, &Device::Cpu).unwrap();
         let network = OthelloNetwork::new(&Device::Cpu, 7).unwrap();
         let (policy, value) = network.forward(&input).unwrap();
+        let (detached_policy, detached_value) = network.detached().forward(&input).unwrap();
 
         assert_eq!(policy.dims(), [2, OTHELLO_ACTIONS]);
         assert_eq!(value.dims(), [2, 1]);
+        assert_eq!(
+            policy.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            detached_policy
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+        assert_eq!(
+            value.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            detached_value
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
         assert!(
             value
                 .flatten_all()

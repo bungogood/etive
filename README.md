@@ -67,17 +67,17 @@ Egaroucid:
 
 ```bash
 cargo run --release -- gtp
+cargo run --release --features cudnn -- gtp --checkpoint checkpoints/model.safetensors
 ```
 
-The current protocol player selects the first legal move deterministically. It
-exists to validate interoperability before MCTS supplies competitive moves.
-Diagnostics must go to stderr while GTP is active because stdout is reserved
-for protocol responses.
+Without a checkpoint the protocol player selects the first legal move for rules
+testing. With a checkpoint it uses MCTS. Diagnostics must go to stderr while
+GTP is active because stdout is reserved for protocol responses.
 
 ## Random Candle Search
 
 Run complete Othello games using PUCT search and a reproducibly initialized
-compact convolutional Candle policy/value network:
+residual Candle policy/value network:
 
 ```bash
 cargo run --release -- mcts --simulations 128 --seed 7
@@ -86,6 +86,27 @@ cargo run --release -- mcts --games 64 --batch-size 64 --simulations 128
 
 Terminal positions bypass the network. Their exact side-to-move-relative game
 result is negated across each search edge during backup.
+
+## Training
+
+Training runs are defined entirely by TOML files. The included configuration
+starts a fresh 24-hour residual-network experiment:
+
+```bash
+cargo run --release --features cudnn -- learn experiments/residual-10x128-24h.toml
+```
+
+Every completed generation atomically saves model weights, AdamW state, replay
+data, metrics, and elapsed run state. Resume the same total runtime after an
+interruption with:
+
+```bash
+cargo run --release --features cudnn -- learn experiments/residual-10x128-24h.toml --resume
+```
+
+Relative checkpoint and output paths are resolved from the configuration file's
+directory. A run copies its configuration into the output directory and refuses
+to resume if that configuration has changed.
 
 ### Tic-Tac-Toe Validation
 

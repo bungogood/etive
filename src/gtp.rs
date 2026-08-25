@@ -1,6 +1,8 @@
 use std::io::{self, BufRead, Write};
 use std::str::FromStr;
 
+use etive::evaluator::OthelloCandleEvaluator;
+use etive::mcts::{Mcts, MctsConfig};
 use etive::othello::{Board, Color, GameStatus, Move, Square};
 
 const COMMANDS: &[&str] = &[
@@ -24,7 +26,34 @@ const COMMANDS: &[&str] = &[
 ];
 
 pub(crate) fn run(reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
-    let mut session = Session::default();
+    run_session(reader, &mut writer, Session::default())
+}
+
+pub(crate) fn run_with_evaluator(
+    reader: impl BufRead,
+    mut writer: impl Write,
+    evaluator: OthelloCandleEvaluator,
+    simulations: u32,
+) -> io::Result<()> {
+    run_session(
+        reader,
+        &mut writer,
+        Session {
+            board: Board::default(),
+            history: Vec::new(),
+            search: Some(SearchEngine {
+                evaluator,
+                simulations,
+            }),
+        },
+    )
+}
+
+fn run_session(
+    reader: impl BufRead,
+    writer: &mut impl Write,
+    mut session: Session,
+) -> io::Result<()> {
     for line in reader.lines() {
         let Some(response) = session.execute(&line?) else {
             continue;
@@ -42,6 +71,12 @@ pub(crate) fn run(reader: impl BufRead, mut writer: impl Write) -> io::Result<()
 struct Session {
     board: Board,
     history: Vec<Board>,
+    search: Option<SearchEngine>,
+}
+
+struct SearchEngine {
+    evaluator: OthelloCandleEvaluator,
+    simulations: u32,
 }
 
 impl Session {
@@ -129,10 +164,19 @@ impl Session {
         let color = one_argument(arguments)?;
         self.require_turn(color)?;
 
-        let mv = match self.board.legal_moves().into_iter().next() {
-            Some(square) => Move::Place(square),
-            None if self.board.is_pass_legal() => Move::Pass,
-            None => return Ok("pass".to_owned()),
+        let mv = match &mut self.search {
+            Some(search) => {
+                let mut tree = Mcts::new(self.board, MctsConfig::default());
+                tree.run(&mut search.evaluator, search.simulations)
+                    .map_err(|error| error.to_string())?;
+                tree.best_action()
+                    .ok_or_else(|| "search found no legal action".to_owned())?
+            }
+            None => match self.board.legal_moves().into_iter().next() {
+                Some(square) => Move::Place(square),
+                None if self.board.is_pass_legal() => Move::Pass,
+                None => return Ok("pass".to_owned()),
+            },
         };
         if play_move {
             self.history.push(self.board);
@@ -271,6 +315,8 @@ fn set_game(arguments: &[&str]) -> Result<String, String> {
 mod tests {
     use std::io::Cursor;
 
+    use candle_core::Device;
+
     use super::*;
     use etive::othello::BitBoard;
 
@@ -322,6 +368,7 @@ mod tests {
         let mut session = Session {
             board: Board::from_discs(a1, b1, Color::White).unwrap(),
             history: Vec::new(),
+            search: None,
         };
 
         let response = session.execute("genmove white").unwrap();
@@ -338,10 +385,30 @@ mod tests {
         let mut session = Session {
             board: Board::from_discs(BitBoard::FULL, BitBoard::EMPTY, Color::White).unwrap(),
             history: Vec::new(),
+            search: None,
         };
         assert_eq!(
             session.execute("final_score").unwrap().render(),
             "= B+64\n\n"
         );
+    }
+
+    #[test]
+    fn checkpoint_search_generates_a_legal_move() {
+        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let mut session = Session {
+            board: Board::default(),
+            history: Vec::new(),
+            search: Some(SearchEngine {
+                evaluator,
+                simulations: 2,
+            }),
+        };
+
+        let response = session.execute("genmove black").unwrap();
+        let mv = parse_move(&response.body).unwrap();
+
+        assert!(Board::default().is_legal(mv));
+        assert_eq!(session.history, vec![Board::default()]);
     }
 }

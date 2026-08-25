@@ -5,25 +5,38 @@ use etive::evaluator::OthelloCandleEvaluator;
 use etive::mcts::{Mcts, MctsConfig, SearchWorkspace};
 use etive::othello::{Board, Color, GameStatus, Move, Square};
 
-const COMMANDS: &[&str] = &[
-    "protocol_version",
-    "name",
-    "version",
-    "known_command",
-    "list_commands",
-    "quit",
-    "boardsize",
-    "clear_board",
-    "komi",
-    "play",
-    "genmove",
-    "reg_genmove",
-    "undo",
-    "set_game",
-    "list_games",
-    "showboard",
-    "final_score",
-];
+macro_rules! commands {
+    ($($variant:ident = $name:literal),+ $(,)?) => {
+        #[derive(Clone, Copy)]
+        enum GtpCommand {
+            $($variant),+
+        }
+
+        const COMMANDS: &[(&str, GtpCommand)] = &[
+            $(($name, GtpCommand::$variant)),+
+        ];
+    };
+}
+
+commands! {
+    ProtocolVersion = "protocol_version",
+    Name = "name",
+    Version = "version",
+    KnownCommand = "known_command",
+    ListCommands = "list_commands",
+    Quit = "quit",
+    BoardSize = "boardsize",
+    ClearBoard = "clear_board",
+    Komi = "komi",
+    Play = "play",
+    GenMove = "genmove",
+    RegGenMove = "reg_genmove",
+    Undo = "undo",
+    SetGame = "set_game",
+    ListGames = "list_games",
+    ShowBoard = "showboard",
+    FinalScore = "final_score",
+}
 
 pub(crate) fn run(reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
     run_session(reader, &mut writer, Session::default())
@@ -127,7 +140,7 @@ impl Session {
             .bytes()
             .all(|byte| byte.is_ascii_digit())
             .then(|| first.to_owned());
-        let command = if id.is_some() {
+        let name = if id.is_some() {
             match fields.next() {
                 Some(command) => command,
                 None => return Some(Response::failure(id, "missing command")),
@@ -136,33 +149,37 @@ impl Session {
             first
         };
         let arguments: Vec<_> = fields.collect();
+        let Some(command) = parse_command(name) else {
+            return Some(Response::failure(id, "unknown command"));
+        };
 
         let result = match command {
-            "protocol_version" => no_arguments(&arguments).map(|()| "2".to_owned()),
-            "name" => no_arguments(&arguments).map(|()| "Etive".to_owned()),
-            "version" => no_arguments(&arguments).map(|()| env!("CARGO_PKG_VERSION").to_owned()),
-            "known_command" => {
-                one_argument(&arguments).map(|command| COMMANDS.contains(&command).to_string())
+            GtpCommand::ProtocolVersion => no_arguments(&arguments).map(|()| "2".to_owned()),
+            GtpCommand::Name => no_arguments(&arguments).map(|()| "Etive".to_owned()),
+            GtpCommand::Version => {
+                no_arguments(&arguments).map(|()| env!("CARGO_PKG_VERSION").to_owned())
             }
-            "list_commands" => no_arguments(&arguments).map(|()| COMMANDS.join("\n")),
-            "boardsize" => self.boardsize(&arguments),
-            "clear_board" => no_arguments(&arguments).map(|()| self.clear()),
-            "komi" => parse_komi(&arguments),
-            "play" => self.play(&arguments),
-            "genmove" => self.genmove(&arguments, true),
-            "reg_genmove" => self.genmove(&arguments, false),
-            "undo" => self.undo(&arguments),
-            "set_game" => set_game(&arguments),
-            "list_games" => no_arguments(&arguments).map(|()| "Othello".to_owned()),
-            "showboard" => no_arguments(&arguments).map(|()| self.board.to_string()),
-            "final_score" => no_arguments(&arguments).map(|()| self.final_score()),
-            "quit" => {
+            GtpCommand::KnownCommand => {
+                one_argument(&arguments).map(|name| parse_command(name).is_some().to_string())
+            }
+            GtpCommand::ListCommands => no_arguments(&arguments).map(|()| command_names()),
+            GtpCommand::BoardSize => self.boardsize(&arguments),
+            GtpCommand::ClearBoard => no_arguments(&arguments).map(|()| self.clear()),
+            GtpCommand::Komi => parse_komi(&arguments),
+            GtpCommand::Play => self.play(&arguments),
+            GtpCommand::GenMove => self.genmove(&arguments, true),
+            GtpCommand::RegGenMove => self.genmove(&arguments, false),
+            GtpCommand::Undo => self.undo(&arguments),
+            GtpCommand::SetGame => set_game(&arguments),
+            GtpCommand::ListGames => no_arguments(&arguments).map(|()| "Othello".to_owned()),
+            GtpCommand::ShowBoard => no_arguments(&arguments).map(|()| self.board.to_string()),
+            GtpCommand::FinalScore => no_arguments(&arguments).map(|()| self.final_score()),
+            GtpCommand::Quit => {
                 return Some(match no_arguments(&arguments) {
                     Ok(()) => Response::success(id, String::new()).with_quit(),
                     Err(error) => Response::failure(id, error),
                 });
             }
-            _ => Err("unknown command".to_owned()),
         };
 
         Some(match result {
@@ -260,6 +277,20 @@ impl Session {
     }
 }
 
+fn parse_command(name: &str) -> Option<GtpCommand> {
+    COMMANDS
+        .iter()
+        .find_map(|&(candidate, command)| (candidate == name).then_some(command))
+}
+
+fn command_names() -> String {
+    COMMANDS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 struct Response {
     id: Option<String>,
     body: String,
@@ -345,10 +376,14 @@ fn format_move(mv: Move) -> String {
 }
 
 fn parse_komi(arguments: &[&str]) -> Result<String, String> {
-    one_argument(arguments)?
+    let komi = one_argument(arguments)?
         .parse::<f64>()
-        .map(|_| String::new())
-        .map_err(|_| "invalid komi".to_owned())
+        .map_err(|_| "invalid komi".to_owned())?;
+    if komi.is_finite() && komi == 0.0 {
+        Ok(String::new())
+    } else {
+        Err("Othello does not support komi".to_owned())
+    }
 }
 
 fn set_game(arguments: &[&str]) -> Result<String, String> {
@@ -389,8 +424,8 @@ mod tests {
     #[test]
     fn rejects_unknown_commands_and_bad_arguments() {
         assert_eq!(
-            exchange("9 boardsize 6\nwat\nkomi nope\nquit now\n"),
-            "?9 unacceptable size\n\n? unknown command\n\n? invalid komi\n\n? unexpected arguments\n\n"
+            exchange("9 boardsize 6\nwat\nkomi nope\nkomi 6.5\nquit now\n"),
+            "?9 unacceptable size\n\n? unknown command\n\n? invalid komi\n\n? Othello does not support komi\n\n? unexpected arguments\n\n"
         );
     }
 

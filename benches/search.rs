@@ -4,7 +4,7 @@ use candle_core::{Device, Tensor};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use etive::encoding::{OthelloEncodingV1, StateEncoder, TicTacToeEncodingV1};
 use etive::evaluator::{
-    BatchEvaluator, Evaluator, OthelloCandleEvaluator, TicTacToeCandleEvaluator, UniformEvaluator,
+    BatchEvaluator, OthelloCandleEvaluator, TicTacToeCandleEvaluator, UniformEvaluator,
 };
 use etive::game::Game;
 use etive::mcts::{Mcts, MctsConfig, SearchWorkspace};
@@ -18,13 +18,17 @@ fn search(c: &mut Criterion) {
     let mut candle = TicTacToeCandleEvaluator::new(device.clone(), 7).unwrap();
     let position = tic_tac_toe::Board::default();
     let mut logits = [0.0; 9];
+    let mut value = [0.0];
     group.bench_function("tic-tac-toe Candle evaluation", |bencher| {
         bencher.iter(|| {
-            black_box(
-                candle
-                    .evaluate(black_box(&position), black_box(&mut logits))
-                    .unwrap(),
-            )
+            candle
+                .evaluate_batch(
+                    black_box(std::slice::from_ref(&position)),
+                    black_box(&mut logits),
+                    black_box(&mut value),
+                )
+                .unwrap();
+            black_box((&logits, &value));
         });
     });
 

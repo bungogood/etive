@@ -20,56 +20,48 @@ use crate::model::OthelloNetwork;
 const REPLAY_MAGIC: &[u8; 8] = b"ETRP0001";
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct ExperimentConfig {
-    pub model: ModelConfig,
-    pub run: RunConfig,
-    pub self_play: SelfPlayConfig,
-    pub training: LearnerConfig,
-    pub evaluation: EvaluationConfig,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ModelConfig {
-    pub architecture: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RunConfig {
-    pub output: PathBuf,
-    pub hours: f64,
-    pub seed: u64,
-    pub start_generation: usize,
-    pub checkpoint: Option<PathBuf>,
+#[serde(deny_unknown_fields)]
+struct Config {
+    output: PathBuf,
+    hours: f64,
+    seed: u64,
+    checkpoint: Option<PathBuf>,
+    self_play: SelfPlay,
+    train: Train,
+    eval: Eval,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
-pub struct SelfPlayConfig {
-    pub games: usize,
-    pub simulations: u32,
-    pub workers: usize,
-    pub inference_batch_size: usize,
-    pub dirichlet_alpha: f64,
-    pub dirichlet_fraction: f32,
-    pub temperature_moves: usize,
+#[serde(deny_unknown_fields)]
+struct SelfPlay {
+    games: usize,
+    simulations: u32,
+    workers: usize,
+    inference_batch_size: usize,
+    dirichlet_alpha: f64,
+    dirichlet_fraction: f32,
+    temperature_moves: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
-pub struct LearnerConfig {
-    pub batch_size: usize,
-    pub replay_positions: usize,
-    pub replay_reuse: usize,
-    pub learning_rate: f64,
-    pub final_learning_rate: f64,
-    pub validation_game_modulus: u64,
+#[serde(deny_unknown_fields)]
+struct Train {
+    batch_size: usize,
+    replay_positions: usize,
+    replay_reuse: usize,
+    learning_rate: f64,
+    final_learning_rate: f64,
+    validation_game_modulus: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
-pub struct EvaluationConfig {
-    pub interval: usize,
-    pub games: usize,
-    pub simulations: u32,
-    pub opening_plies: usize,
-    pub seed: u64,
+#[serde(deny_unknown_fields)]
+struct Eval {
+    interval: usize,
+    games: usize,
+    simulations: u32,
+    opening_plies: usize,
+    seed: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -81,7 +73,6 @@ struct RunState {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct PendingSelfPlay {
     generation: usize,
-    samples: usize,
     training_samples: usize,
     validation_samples: usize,
     elapsed_seconds: f64,
@@ -92,98 +83,89 @@ struct PendingSelfPlay {
 pub fn run(
     config_path: impl AsRef<Path>,
     device: Device,
-    resume: bool,
+    clean: bool,
 ) -> Result<(), Box<dyn Error>> {
     let config_path = config_path.as_ref();
     let source = fs::read_to_string(config_path)?;
-    let mut config: ExperimentConfig = toml::from_str(&source)?;
+    let mut config: Config = toml::from_str(&source)?;
     resolve_paths(&mut config, config_path.parent().unwrap_or(Path::new(".")));
     validate(&config)?;
 
-    if resume {
+    if clean {
+        clean_output(&config.output)?;
+    }
+    if config.output.exists() {
         resume_run(config, source, device)
     } else {
         start_run(config, source, device)
     }
 }
 
-fn start_run(
-    config: ExperimentConfig,
-    source: String,
-    device: Device,
-) -> Result<(), Box<dyn Error>> {
-    if config.run.output.exists() {
-        return Err(format!("output already exists: {}", config.run.output.display()).into());
+fn start_run(config: Config, source: String, device: Device) -> Result<(), Box<dyn Error>> {
+    if config.output.exists() {
+        return Err(format!("output already exists: {}", config.output.display()).into());
     }
-    fs::create_dir_all(config.run.output.join("replay"))?;
-    fs::write(config.run.output.join("config.toml"), source)?;
-    write_metrics_header(&config.run.output.join("metrics.csv"))?;
+    fs::create_dir_all(config.output.join("replay"))?;
+    fs::write(config.output.join("config.toml"), source)?;
+    write_metrics_header(&config.output.join("metrics.csv"))?;
 
-    let network = match &config.run.checkpoint {
+    let network = match &config.checkpoint {
         Some(path) => OthelloNetwork::load(path, &device)?,
-        None => OthelloNetwork::new(&device, config.run.seed)?,
+        None => OthelloNetwork::new(&device, config.seed)?,
     };
     let trainer = TrainingSession::new(
         &network,
         device.clone(),
-        config.training.batch_size,
-        config.training.learning_rate,
-        config.run.seed,
+        config.train.batch_size,
+        config.train.learning_rate,
+        config.seed,
     )?;
-    let checkpoint = checkpoint_path(&config.run.output, config.run.start_generation);
-    let optimizer = optimizer_path(&config.run.output, config.run.start_generation);
+    let checkpoint = checkpoint_path(&config.output, 0);
+    let optimizer = optimizer_path(&config.output, 0);
     atomic_network_save(&network, &checkpoint)?;
     atomic_optimizer_save(&trainer, &optimizer)?;
-    atomic_state_save(
-        &config.run.output.join("state.toml"),
-        RunState {
-            generation: config.run.start_generation,
+    atomic_toml_save(
+        &config.output.join("state.toml"),
+        &RunState {
+            generation: 0,
             elapsed_seconds: 0.0,
         },
     )?;
 
-    run_loop(config, device, network, trainer, VecDeque::new(), 0.0)
+    run_loop(config, device, network, trainer, VecDeque::new(), 0, 0.0)
 }
 
-fn resume_run(
-    config: ExperimentConfig,
-    source: String,
-    device: Device,
-) -> Result<(), Box<dyn Error>> {
-    let stored_config = fs::read_to_string(config.run.output.join("config.toml"))?;
-    let state: RunState =
-        toml::from_str(&fs::read_to_string(config.run.output.join("state.toml"))?)?;
+fn resume_run(config: Config, source: String, device: Device) -> Result<(), Box<dyn Error>> {
+    let stored_config = fs::read_to_string(config.output.join("config.toml"))?;
+    let state: RunState = toml::from_str(&fs::read_to_string(config.output.join("state.toml"))?)?;
     if stored_config != source {
         fs::write(
-            config.run.output.join(format!(
+            config.output.join(format!(
                 "config-before-resume-generation-{:04}.toml",
                 state.generation
             )),
             stored_config,
         )?;
-        fs::write(config.run.output.join("config.toml"), &source)?;
+        fs::write(config.output.join("config.toml"), &source)?;
         println!(
             "configuration changed; archived the previous config at generation {}",
             state.generation
         );
     }
-    repair_metrics(&config.run.output.join("metrics.csv"), state.generation)?;
-    let network = OthelloNetwork::load(
-        checkpoint_path(&config.run.output, state.generation),
-        &device,
-    )?;
+    repair_metrics(&config.output.join("metrics.csv"), state.generation)?;
+    let network = OthelloNetwork::load(checkpoint_path(&config.output, state.generation), &device)?;
     let mut trainer = TrainingSession::new(
         &network,
         device.clone(),
-        config.training.batch_size,
-        config.training.learning_rate,
-        config.run.seed,
+        config.train.batch_size,
+        config.train.learning_rate,
+        config.seed,
     )?;
-    trainer.load_optimizer(optimizer_path(&config.run.output, state.generation))?;
+    trainer.load_optimizer(optimizer_path(&config.output, state.generation))?;
     let replay = load_replay(
-        &config.run.output,
+        &config.output,
         state.generation,
-        config.training.replay_positions,
+        config.train.replay_positions,
     )?;
     println!(
         "resuming generation {} with {} replay positions after {:.1}s",
@@ -197,31 +179,32 @@ fn resume_run(
         network,
         trainer,
         replay,
+        state.generation,
         state.elapsed_seconds,
     )
 }
 
 fn run_loop(
-    config: ExperimentConfig,
+    config: Config,
     device: Device,
     mut network: OthelloNetwork,
     mut trainer: TrainingSession,
     mut replay: VecDeque<Vec<SelfPlaySample>>,
+    mut generation: usize,
     prior_elapsed: f64,
 ) -> Result<(), Box<dyn Error>> {
     let run_start = Instant::now();
-    let run_seconds = config.run.hours * 60.0 * 60.0;
-    let state_path = config.run.output.join("state.toml");
-    let metrics_path = config.run.output.join("metrics.csv");
-    let mut generation = current_generation(&state_path)?;
-    discard_committed_self_play(&config.run.output, generation)?;
+    let run_seconds = config.hours * 60.0 * 60.0;
+    let state_path = config.output.join("state.toml");
+    let metrics_path = config.output.join("metrics.csv");
+    discard_committed_self_play(&config.output, generation)?;
     let mut recovered_elapsed = 0.0;
 
     while prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64() < run_seconds {
         generation += 1;
-        let pending_path = config.run.output.join("pending-self-play.toml");
-        let training_path = replay_path(&config.run.output, generation);
-        let validation_path = validation_replay_path(&config.run.output, generation);
+        let pending_path = config.output.join("pending-self-play.toml");
+        let training_path = replay_path(&config.output, generation);
+        let validation_path = validation_replay_path(&config.output, generation);
         let (training, validation, pending) = if let Some(recovered) =
             recover_self_play(&pending_path, &training_path, &validation_path, generation)?
         {
@@ -229,7 +212,7 @@ fn run_loop(
             recovered_elapsed += pending.elapsed_seconds;
             println!(
                 "generation {generation}: recovered {} persisted self-play positions",
-                pending.samples
+                training.len() + validation.len()
             );
             (training, validation, pending)
         } else {
@@ -243,7 +226,7 @@ fn run_loop(
                     simulations: config.self_play.simulations,
                     workers: config.self_play.workers,
                     inference_batch_size: config.self_play.inference_batch_size,
-                    seed: config.run.seed.wrapping_add(generation as u64),
+                    seed: config.seed.wrapping_add(generation as u64),
                     dirichlet_alpha: config.self_play.dirichlet_alpha,
                     dirichlet_fraction: config.self_play.dirichlet_fraction,
                     temperature_moves: config.self_play.temperature_moves,
@@ -254,10 +237,9 @@ fn run_loop(
             let (validation, training): (Vec<_>, Vec<_>) = self_play
                 .samples
                 .into_iter()
-                .partition(|sample| sample.game % config.training.validation_game_modulus == 0);
+                .partition(|sample| sample.game % config.train.validation_game_modulus == 0);
             let pending = PendingSelfPlay {
                 generation,
-                samples: training.len() + validation.len(),
                 training_samples: training.len(),
                 validation_samples: validation.len(),
                 elapsed_seconds: self_play_elapsed.as_secs_f64(),
@@ -269,13 +251,13 @@ fn run_loop(
             atomic_toml_save(&pending_path, &pending)?;
             (training, validation, pending)
         };
-        let sample_count = pending.samples;
+        let sample_count = pending.training_samples + pending.validation_samples;
         let training_sample_count = pending.training_samples;
         let validation_sample_count = pending.validation_samples;
         let evaluations = pending.evaluations;
         let unique_games = pending.unique_games;
         replay.push_back(training);
-        trim_replay(&mut replay, config.training.replay_positions);
+        trim_replay(&mut replay, config.train.replay_positions);
         let replay_samples = replay.iter().map(Vec::len).sum::<usize>();
         println!(
             "generation {generation}: generated {sample_count} positions from {unique_games} unique games in {:.3?}",
@@ -284,13 +266,13 @@ fn run_loop(
 
         let total_elapsed = prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64();
         let progress = (total_elapsed / run_seconds).min(1.0);
-        let learning_rate = config.training.learning_rate
-            * (config.training.final_learning_rate / config.training.learning_rate).powf(progress);
+        let learning_rate = config.train.learning_rate
+            * (config.train.final_learning_rate / config.train.learning_rate).powf(progress);
         trainer.set_learning_rate(learning_rate);
-        trainer.reseed(config.run.seed.wrapping_add(generation as u64));
+        trainer.reseed(config.seed.wrapping_add(generation as u64));
         let training_steps = training_sample_count
-            .saturating_mul(config.training.replay_reuse)
-            .div_ceil(config.training.batch_size);
+            .saturating_mul(config.train.replay_reuse)
+            .div_ceil(config.train.batch_size);
         let replay_slices = replay.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let training_report = trainer.train_steps(&network, &replay_slices, training_steps)?;
         let validation_loss = if validation.is_empty() {
@@ -300,7 +282,7 @@ fn run_loop(
                 &network,
                 &device,
                 &validation,
-                config.training.batch_size,
+                config.train.batch_size,
             )?)
         };
         println!(
@@ -308,13 +290,13 @@ fn run_loop(
             training_report.elapsed
         );
 
-        let checkpoint = checkpoint_path(&config.run.output, generation);
-        let optimizer = optimizer_path(&config.run.output, generation);
+        let checkpoint = checkpoint_path(&config.output, generation);
+        let optimizer = optimizer_path(&config.output, generation);
         atomic_network_save(&network, &checkpoint)?;
         atomic_optimizer_save(&trainer, &optimizer)?;
-        let evaluation = if generation.is_multiple_of(config.evaluation.interval) {
+        let evaluation = if generation.is_multiple_of(config.eval.interval) {
             let previous_network =
-                OthelloNetwork::load(checkpoint_path(&config.run.output, generation - 1), &device)?;
+                OthelloNetwork::load(checkpoint_path(&config.output, generation - 1), &device)?;
             let mut previous =
                 OthelloCandleEvaluator::from_network(device.clone(), previous_network);
             let mut current = OthelloCandleEvaluator::from_network(device.clone(), network);
@@ -322,11 +304,11 @@ fn run_loop(
                 &mut current,
                 &mut previous,
                 ArenaConfig {
-                    games: config.evaluation.games,
-                    simulations: config.evaluation.simulations,
+                    games: config.eval.games,
+                    simulations: config.eval.simulations,
                     batch_size: config.self_play.inference_batch_size,
-                    opening_plies: config.evaluation.opening_plies,
-                    seed: config.evaluation.seed.wrapping_add(generation as u64),
+                    opening_plies: config.eval.opening_plies,
+                    seed: config.eval.seed.wrapping_add(generation as u64),
                 },
                 |_| {},
             )?;
@@ -339,7 +321,7 @@ fn run_loop(
         let (current_wins, previous_wins, draws, score) = match evaluation {
             Some(result) => {
                 let score = (result.trained_wins as f32 + 0.5 * result.draws as f32)
-                    / config.evaluation.games as f32;
+                    / config.eval.games as f32;
                 println!(
                     "generation {generation}: evaluation {}-{}-{}, score {:.1}%",
                     result.trained_wins,
@@ -373,9 +355,9 @@ fn run_loop(
                 checkpoint.display()
             ),
         )?;
-        atomic_state_save(
+        atomic_toml_save(
             &state_path,
-            RunState {
+            &RunState {
                 generation,
                 elapsed_seconds: prior_elapsed
                     + recovered_elapsed
@@ -434,54 +416,66 @@ fn recover_self_play(
     }
     let training = read_replay(training_path)?;
     let validation = read_replay(validation_path)?;
-    if pending.training_samples != training.len()
-        || pending.validation_samples != validation.len()
-        || pending.samples != training.len() + validation.len()
+    if pending.training_samples != training.len() || pending.validation_samples != validation.len()
     {
         return Err("pending self-play manifest does not match replay data".into());
     }
     Ok(Some((training, validation, pending)))
 }
 
-fn validate(config: &ExperimentConfig) -> Result<(), Box<dyn Error>> {
-    if config.model.architecture != "residual-10x128-groupnorm" {
-        return Err(format!(
-            "unsupported model architecture: {}",
-            config.model.architecture
-        )
-        .into());
-    }
-    if !config.run.hours.is_finite()
-        || config.run.hours <= 0.0
+fn validate(config: &Config) -> Result<(), Box<dyn Error>> {
+    if !config.hours.is_finite()
+        || config.hours <= 0.0
         || config.self_play.games == 0
         || config.self_play.simulations < 2
         || config.self_play.workers == 0
         || config.self_play.inference_batch_size == 0
-        || config.training.batch_size == 0
-        || config.training.replay_positions == 0
-        || config.training.replay_reuse == 0
-        || config.training.learning_rate <= 0.0
-        || config.training.final_learning_rate <= 0.0
-        || config.training.validation_game_modulus < 2
-        || config.evaluation.interval == 0
-        || config.evaluation.games == 0
-        || !config.evaluation.games.is_multiple_of(2)
-        || config.evaluation.simulations < 2
+        || !config.self_play.dirichlet_alpha.is_finite()
+        || config.self_play.dirichlet_alpha <= 0.0
+        || !config.self_play.dirichlet_fraction.is_finite()
+        || !(0.0..=1.0).contains(&config.self_play.dirichlet_fraction)
+        || config.train.batch_size == 0
+        || config.train.replay_positions == 0
+        || config.train.replay_reuse == 0
+        || !config.train.learning_rate.is_finite()
+        || config.train.learning_rate <= 0.0
+        || !config.train.final_learning_rate.is_finite()
+        || config.train.final_learning_rate <= 0.0
+        || config.train.validation_game_modulus < 2
+        || config.eval.interval == 0
+        || config.eval.games == 0
+        || !config.eval.games.is_multiple_of(2)
+        || config.eval.simulations < 2
     {
         return Err("invalid experiment configuration".into());
     }
     Ok(())
 }
 
-fn resolve_paths(config: &mut ExperimentConfig, base: &Path) {
-    if config.run.output.is_relative() {
-        config.run.output = base.join(&config.run.output);
+fn resolve_paths(config: &mut Config, base: &Path) {
+    if config.output.is_relative() {
+        config.output = base.join(&config.output);
     }
-    if let Some(checkpoint) = &mut config.run.checkpoint
+    if let Some(checkpoint) = &mut config.checkpoint
         && checkpoint.is_relative()
     {
         *checkpoint = base.join(&*checkpoint);
     }
+}
+
+fn clean_output(output: &Path) -> Result<(), Box<dyn Error>> {
+    if !output.exists() {
+        return Ok(());
+    }
+    if !output.join("config.toml").is_file() || !output.join("state.toml").is_file() {
+        return Err(format!(
+            "refusing to clean unrecognized output directory: {}",
+            output.display()
+        )
+        .into());
+    }
+    fs::remove_dir_all(output)?;
+    Ok(())
 }
 
 fn trim_replay(replay: &mut VecDeque<Vec<SelfPlaySample>>, maximum: usize) {
@@ -640,11 +634,6 @@ fn repair_metrics(path: &Path, generation: usize) -> io::Result<()> {
     fs::write(path, repaired)
 }
 
-fn current_generation(path: &Path) -> Result<usize, Box<dyn Error>> {
-    let state: RunState = toml::from_str(&fs::read_to_string(path)?)?;
-    Ok(state.generation)
-}
-
 fn atomic_network_save(network: &OthelloNetwork, path: &Path) -> candle_core::Result<()> {
     let temporary = temporary_path(path);
     network.save(&temporary)?;
@@ -657,10 +646,6 @@ fn atomic_optimizer_save(trainer: &TrainingSession, path: &Path) -> candle_core:
     trainer.save_optimizer(&temporary)?;
     fs::rename(&temporary, path).map_err(candle_core::Error::from)?;
     Ok(())
-}
-
-fn atomic_state_save(path: &Path, state: RunState) -> Result<(), Box<dyn Error>> {
-    atomic_toml_save(path, &state)
 }
 
 fn atomic_toml_save(path: &Path, value: &impl Serialize) -> Result<(), Box<dyn Error>> {
@@ -699,6 +684,68 @@ fn validation_replay_path(output: &Path, generation: usize) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONFIG: &str = r#"
+output = "checkpoints/run"
+hours = 24.0
+seed = 7
+
+[self_play]
+games = 4096
+simulations = 256
+workers = 8
+inference_batch_size = 1024
+dirichlet_alpha = 0.3
+dirichlet_fraction = 0.25
+temperature_moves = 20
+
+[train]
+batch_size = 256
+replay_positions = 4000000
+replay_reuse = 4
+learning_rate = 0.001
+final_learning_rate = 0.0003
+validation_game_modulus = 20
+
+[eval]
+interval = 2
+games = 500
+simulations = 256
+opening_plies = 8
+seed = 4242
+"#;
+
+    #[test]
+    fn config_has_three_strict_sections() {
+        let config: Config = toml::from_str(CONFIG).unwrap();
+
+        assert_eq!(config.self_play.games, 4096);
+        assert_eq!(config.train.batch_size, 256);
+        assert_eq!(config.eval.simulations, 256);
+        assert!(validate(&config).is_ok());
+        assert!(toml::from_str::<Config>(&format!("{CONFIG}\nextra = true")).is_err());
+    }
+
+    #[test]
+    fn clean_only_removes_recognized_runs() {
+        let output = std::env::temp_dir().join(format!("etive-clean-{}", std::process::id()));
+        if output.exists() {
+            fs::remove_dir_all(&output).unwrap();
+        }
+        fs::create_dir(&output).unwrap();
+
+        assert!(clean_output(&output).is_err());
+        assert!(output.exists());
+
+        fs::write(output.join("config.toml"), CONFIG).unwrap();
+        fs::write(
+            output.join("state.toml"),
+            "generation = 0\nelapsed_seconds = 0.0\n",
+        )
+        .unwrap();
+        clean_output(&output).unwrap();
+        assert!(!output.exists());
+    }
 
     #[test]
     fn replay_round_trips() {
@@ -757,7 +804,6 @@ mod tests {
             &manifest_path,
             &PendingSelfPlay {
                 generation: 1,
-                samples: 1,
                 training_samples: 1,
                 validation_samples: 0,
                 elapsed_seconds: 1.0,

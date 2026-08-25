@@ -10,14 +10,6 @@ use crate::model::{OthelloNetwork, TicTacToeNetwork};
 use crate::othello;
 use crate::tic_tac_toe::{self, minimax};
 
-/// Supplies policy logits and a side-to-move-relative value for a position.
-pub trait Evaluator<G: Game> {
-    type Error;
-
-    /// Writes exactly [`Game::ACTION_COUNT`] policy logits into `policy_logits`.
-    fn evaluate(&mut self, game: &G, policy_logits: &mut [f32]) -> Result<f32, Self::Error>;
-}
-
 /// Evaluates many independent positions in one model invocation.
 pub trait BatchEvaluator<G: Game> {
     type Error;
@@ -82,7 +74,10 @@ impl<G: Game, T> InferenceBatch<G, T> {
         self.tags.iter()
     }
 
-    pub fn evaluate<E: BatchEvaluator<G>>(&mut self, evaluator: &mut E) -> Result<(), E::Error> {
+    pub fn evaluate_batch<E: BatchEvaluator<G>>(
+        &mut self,
+        evaluator: &mut E,
+    ) -> Result<(), E::Error> {
         self.policy_logits
             .resize(self.positions.len() * G::ACTION_COUNT, 0.0);
         self.values.resize(self.positions.len(), 0.0);
@@ -102,16 +97,6 @@ impl<G: Game, T> InferenceBatch<G, T> {
 /// A deterministic baseline with equal logits and zero value.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UniformEvaluator;
-
-impl<G: Game> Evaluator<G> for UniformEvaluator {
-    type Error = Infallible;
-
-    fn evaluate(&mut self, _game: &G, policy_logits: &mut [f32]) -> Result<f32, Self::Error> {
-        assert_eq!(policy_logits.len(), G::ACTION_COUNT);
-        policy_logits.fill(0.0);
-        Ok(0.0)
-    }
-}
 
 impl<G: Game> BatchEvaluator<G> for UniformEvaluator {
     type Error = Infallible;
@@ -134,26 +119,6 @@ impl<G: Game> BatchEvaluator<G> for UniformEvaluator {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TicTacToeMinimaxEvaluator;
 
-impl Evaluator<tic_tac_toe::Board> for TicTacToeMinimaxEvaluator {
-    type Error = Infallible;
-
-    fn evaluate(
-        &mut self,
-        game: &tic_tac_toe::Board,
-        policy_logits: &mut [f32],
-    ) -> Result<f32, Self::Error> {
-        assert_eq!(policy_logits.len(), tic_tac_toe::Board::ACTION_COUNT);
-        policy_logits.fill(0.0);
-        for action in game.legal_actions() {
-            let mut child = *game;
-            child.play_unchecked(action);
-            let outcome = minimax(&child).reversed();
-            policy_logits[action.index()] = 4.0 * outcome.value();
-        }
-        Ok(minimax(game).value())
-    }
-}
-
 impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeMinimaxEvaluator {
     type Error = Infallible;
 
@@ -170,16 +135,20 @@ impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeMinimaxEvaluator {
         assert_eq!(values.len(), games.len());
         for (index, game) in games.iter().enumerate() {
             let start = index * tic_tac_toe::Board::ACTION_COUNT;
-            values[index] = self.evaluate(
-                game,
-                &mut policy_logits[start..start + tic_tac_toe::Board::ACTION_COUNT],
-            )?;
+            let policy = &mut policy_logits[start..start + tic_tac_toe::Board::ACTION_COUNT];
+            policy.fill(0.0);
+            for action in game.legal_actions() {
+                let mut child = *game;
+                child.play_unchecked(action);
+                policy[action.index()] = 4.0 * minimax(&child).reversed().value();
+            }
+            values[index] = minimax(game).value();
         }
         Ok(())
     }
 }
 
-/// Synchronous single-position Candle evaluation for initial integration tests.
+/// Batched Candle evaluation for tic-tac-toe tests.
 pub struct TicTacToeCandleEvaluator {
     network: TicTacToeNetwork,
     device: Device,
@@ -210,20 +179,6 @@ impl TicTacToeCandleEvaluator {
 
     pub const fn batches(&self) -> u64 {
         self.batches
-    }
-}
-
-impl Evaluator<tic_tac_toe::Board> for TicTacToeCandleEvaluator {
-    type Error = candle_core::Error;
-
-    fn evaluate(
-        &mut self,
-        game: &tic_tac_toe::Board,
-        policy_logits: &mut [f32],
-    ) -> Result<f32, Self::Error> {
-        let mut value = [0.0];
-        self.evaluate_batch(std::slice::from_ref(game), policy_logits, &mut value)?;
-        Ok(value[0])
     }
 }
 
@@ -296,20 +251,6 @@ impl OthelloCandleEvaluator {
 
     pub fn into_network(self) -> OthelloNetwork {
         self.trainable_network
-    }
-}
-
-impl Evaluator<othello::Board> for OthelloCandleEvaluator {
-    type Error = candle_core::Error;
-
-    fn evaluate(
-        &mut self,
-        game: &othello::Board,
-        policy_logits: &mut [f32],
-    ) -> Result<f32, Self::Error> {
-        let mut value = [0.0];
-        self.evaluate_batch(std::slice::from_ref(game), policy_logits, &mut value)?;
-        Ok(value[0])
     }
 }
 

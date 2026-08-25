@@ -252,7 +252,7 @@ fn run_inference(
             }
         }
         batch
-            .evaluate(&mut evaluator)
+            .evaluate_batch(&mut evaluator)
             .map_err(ActorError::Evaluator)?;
 
         for index in 0..batch.len() {

@@ -19,14 +19,6 @@ use crate::mcts::{Mcts, MctsConfig, SearchWorkspace};
 use crate::model::OthelloNetwork;
 
 #[derive(Clone, Copy, Debug)]
-pub struct TrainingConfig {
-    pub duration: Duration,
-    pub batch_size: usize,
-    pub learning_rate: f64,
-    pub seed: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct TrainingReport {
     pub steps: usize,
     pub policy_loss: f32,
@@ -48,11 +40,6 @@ pub struct TrainingSession {
     inputs: Vec<f32>,
     policies: Vec<f32>,
     outcomes: Vec<f32>,
-}
-
-pub struct TrainingSnapshot {
-    step: usize,
-    moments: Vec<(Tensor, Tensor)>,
 }
 
 struct AdamVariable {
@@ -94,43 +81,6 @@ pub struct ArenaConfig {
     pub batch_size: usize,
     pub opening_plies: usize,
     pub seed: u64,
-}
-
-pub fn train(
-    network: &OthelloNetwork,
-    device: &Device,
-    samples: &[SelfPlaySample],
-    config: TrainingConfig,
-) -> candle_core::Result<TrainingReport> {
-    if samples.is_empty() || config.batch_size == 0 || config.learning_rate <= 0.0 {
-        candle_core::bail!(
-            "training data and batch size must be non-empty and learning rate positive"
-        )
-    }
-
-    let mut session = TrainingSession::new(
-        network,
-        device.clone(),
-        config.batch_size,
-        config.learning_rate,
-        config.seed,
-    )?;
-    let start = Instant::now();
-    let mut steps = 0;
-    let mut final_losses = None;
-
-    while steps == 0 || start.elapsed() < config.duration {
-        final_losses = Some(session.step(network, &[samples])?);
-        steps += 1;
-    }
-
-    let (policy_loss, value_loss) = final_losses.expect("training always performs one step");
-    Ok(TrainingReport {
-        steps,
-        policy_loss: policy_loss.to_scalar()?,
-        value_loss: value_loss.to_scalar()?,
-        elapsed: start.elapsed(),
-    })
 }
 
 pub fn evaluate_loss(
@@ -223,14 +173,6 @@ impl TrainingSession {
             value_loss: value_loss.to_scalar()?,
             elapsed: start.elapsed(),
         })
-    }
-
-    pub fn snapshot(&self) -> candle_core::Result<TrainingSnapshot> {
-        self.optimizer.snapshot()
-    }
-
-    pub fn restore(&mut self, snapshot: &TrainingSnapshot) -> candle_core::Result<()> {
-        self.optimizer.restore(snapshot)
     }
 
     pub fn set_learning_rate(&mut self, learning_rate: f64) {
@@ -356,35 +298,6 @@ impl RestorableAdamW {
         Ok(())
     }
 
-    fn snapshot(&self) -> candle_core::Result<TrainingSnapshot> {
-        let moments = self
-            .variables
-            .iter()
-            .map(|state| {
-                Ok((
-                    state.first_moment.as_tensor().copy()?,
-                    state.second_moment.as_tensor().copy()?,
-                ))
-            })
-            .collect::<candle_core::Result<Vec<_>>>()?;
-        Ok(TrainingSnapshot {
-            step: self.step,
-            moments,
-        })
-    }
-
-    fn restore(&mut self, snapshot: &TrainingSnapshot) -> candle_core::Result<()> {
-        if snapshot.moments.len() != self.variables.len() {
-            candle_core::bail!("optimizer snapshot does not match model variables")
-        }
-        self.step = snapshot.step;
-        for (state, (first, second)) in self.variables.iter().zip(&snapshot.moments) {
-            state.first_moment.set(first)?;
-            state.second_moment.set(second)?;
-        }
-        Ok(())
-    }
-
     fn save(&self, path: impl AsRef<Path>) -> candle_core::Result<()> {
         let mut tensors = HashMap::with_capacity(self.variables.len() * 2 + 2);
         for state in &self.variables {
@@ -469,26 +382,6 @@ fn transform_square(index: usize, symmetry: usize) -> usize {
         column = 7 - column;
     }
     row * 8 + column
-}
-
-pub fn arena(
-    trained: &mut OthelloCandleEvaluator,
-    initial: &mut OthelloCandleEvaluator,
-    games: usize,
-    simulations: u32,
-) -> Result<ArenaResult, Box<dyn Error>> {
-    arena_with_progress(
-        trained,
-        initial,
-        ArenaConfig {
-            games,
-            simulations,
-            batch_size: games,
-            opening_plies: 0,
-            seed: 0,
-        },
-        |_| {},
-    )
 }
 
 pub fn arena_with_progress(
@@ -627,18 +520,8 @@ mod tests {
             game: 1,
         };
 
-        let report = train(
-            &network,
-            &device,
-            &[sample],
-            TrainingConfig {
-                duration: Duration::ZERO,
-                batch_size: 2,
-                learning_rate: 0.001,
-                seed: 11,
-            },
-        )
-        .unwrap();
+        let mut session = TrainingSession::new(&network, device, 2, 0.001, 11).unwrap();
+        let report = session.train_steps(&network, &[&[sample]], 1).unwrap();
 
         assert_eq!(report.steps, 1);
         assert!(report.policy_loss.is_finite());

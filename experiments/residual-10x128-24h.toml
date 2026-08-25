@@ -1,11 +1,6 @@
-[model]
-architecture = "residual-10x128-groupnorm"
-
-[run]
 output = "../checkpoints/residual-10x128-24h"
 hours = 24.0
 seed = 7
-start_generation = 0
 
 [self_play]
 games = 4096
@@ -16,7 +11,7 @@ dirichlet_alpha = 0.3
 dirichlet_fraction = 0.25
 temperature_moves = 20
 
-[training]
+[train]
 batch_size = 256
 replay_positions = 4000000
 replay_reuse = 4
@@ -24,7 +19,7 @@ learning_rate = 0.001
 final_learning_rate = 0.0003
 validation_game_modulus = 20
 
-[evaluation]
+[eval]
 interval = 2
 games = 500
 simulations = 256

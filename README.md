@@ -44,18 +44,9 @@ cargo run --release -- perft 11
 
 ## Candle Backends
 
-CPU is the default backend. The `candle` command runs a small tensor operation
-to verify the selected device:
-
-```bash
-cargo run -- candle
-cargo run --release --features cuda -- candle
-cargo run --release --features cudnn -- candle
-cargo run --release --features metal -- candle
-```
-
-CUDA and cuDNN builds require the corresponding NVIDIA development libraries;
-enabling a Cargo feature does not install them.
+CPU is the default. Select Accelerate, CUDA, cuDNN, or Metal with the matching
+Cargo feature. CUDA and cuDNN require the corresponding NVIDIA development
+libraries.
 
 Use `cargo run -- --help` to display the available commands.
 
@@ -75,18 +66,13 @@ testing. With a checkpoint it uses persistent, leaf-parallel MCTS and batches up
 to `--batch-size` positions in each network invocation. Diagnostics must go to
 stderr while GTP is active because stdout is reserved for protocol responses.
 
-## Random Candle Search
+## Evaluation
 
-Run complete Othello games using PUCT search and a reproducibly initialized
-residual Candle policy/value network:
+Compare two checkpoints with color-balanced games and reproducible openings:
 
 ```bash
-cargo run --release -- mcts --simulations 128 --seed 7
-cargo run --release -- mcts --games 64 --batch-size 64 --simulations 128
+cargo run --release --features cudnn -- eval previous.safetensors contender.safetensors
 ```
-
-Terminal positions bypass the network. Their exact side-to-move-relative game
-result is negated across each search edge during backup.
 
 ## Training
 
@@ -94,21 +80,18 @@ Training runs are defined entirely by TOML files. The included configuration
 starts a fresh 24-hour residual-network experiment:
 
 ```bash
-cargo run --release --features cudnn -- learn experiments/residual-10x128-24h.toml
+cargo run --release --features cudnn -- train experiments/residual-10x128-24h.toml
 ```
 
-Every completed generation atomically saves model weights, AdamW state, replay
-data, metrics, and elapsed run state. Resume the same total runtime after an
-interruption with:
+Every completed generation saves model weights, AdamW state, replay data,
+metrics, and elapsed run state. The same command resumes automatically when its
+configured output directory contains an Etive run.
 
-```bash
-cargo run --release --features cudnn -- learn experiments/residual-10x128-24h.toml --resume
-```
-
-Relative checkpoint and output paths are resolved from the configuration file's
-directory. A run copies its configuration into the output directory. If a
-resume changes that configuration, the previous version is archived beside the
-run before the new settings take effect.
+Use `--clean` to discard a recognized run and start again. Etive refuses to
+clean an output directory without its run metadata. Relative checkpoint and
+output paths are resolved from the configuration file's directory. A run copies
+its configuration into the output directory; changed configurations are
+archived when a run resumes.
 
 ### Tic-Tac-Toe Validation
 

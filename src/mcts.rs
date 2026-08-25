@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::evaluator::{BatchEvaluator, Evaluator, InferenceBatch};
+use crate::evaluator::{BatchEvaluator, InferenceBatch};
 use crate::game::Game;
 
 static NEXT_TREE_ID: AtomicU64 = AtomicU64::new(1);
@@ -114,34 +114,6 @@ struct PendingEvaluation {
     path: Vec<(usize, usize)>,
 }
 
-/// Runs equal simulation counts across independent trees using bounded batches.
-pub fn run_batched<G, E>(
-    trees: &mut [Mcts<G>],
-    evaluator: &mut E,
-    simulations: u32,
-    max_batch_size: usize,
-) -> Result<(), SearchError<E::Error>>
-where
-    G: Game,
-    E: BatchEvaluator<G>,
-{
-    SearchWorkspace::new(max_batch_size).run_batched(trees, evaluator, simulations)
-}
-
-/// Runs leaf-parallel search across one or more trees using bounded batches.
-pub fn run_parallel<G, E>(
-    trees: &mut [Mcts<G>],
-    evaluator: &mut E,
-    simulations: u32,
-    max_batch_size: usize,
-) -> Result<(), SearchError<E::Error>>
-where
-    G: Game,
-    E: BatchEvaluator<G>,
-{
-    SearchWorkspace::new(max_batch_size).run_parallel(trees, evaluator, simulations)
-}
-
 /// Reusable scheduling and inference storage for batched MCTS calls.
 pub struct SearchWorkspace<G: Game> {
     maximum: usize,
@@ -227,7 +199,7 @@ impl<G: Game> SearchWorkspace<G> {
                 break;
             }
 
-            if let Err(error) = self.batch.evaluate(evaluator) {
+            if let Err(error) = self.batch.evaluate_batch(evaluator) {
                 for &(tree_index, request) in self.batch.tags() {
                     trees[tree_index].cancel(request);
                 }
@@ -277,7 +249,7 @@ impl<G: Game> Mcts<G> {
         }
     }
 
-    pub fn run<E: Evaluator<G>>(
+    pub fn run<E: BatchEvaluator<G>>(
         &mut self,
         evaluator: &mut E,
         simulations: u32,
@@ -291,14 +263,16 @@ impl<G: Game> Mcts<G> {
                 match self.select().map_err(SearchError::Mcts)? {
                     Selection::Terminal => {}
                     Selection::Evaluate { request, position } => {
-                        let value = match evaluator.evaluate(position, &mut policy_logits) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                self.cancel(request);
-                                return Err(SearchError::Evaluator(error));
-                            }
-                        };
-                        self.complete(request, &policy_logits, value)
+                        let mut value = [0.0];
+                        if let Err(error) = evaluator.evaluate_batch(
+                            std::slice::from_ref(position),
+                            &mut policy_logits,
+                            &mut value,
+                        ) {
+                            self.cancel(request);
+                            return Err(SearchError::Evaluator(error));
+                        }
+                        self.complete(request, &policy_logits, value[0])
                             .map_err(SearchError::Mcts)?;
                     }
                     Selection::Blocked => unreachable!("synchronous search has no pending request"),
@@ -948,7 +922,9 @@ mod tests {
             fail: false,
         };
 
-        run_parallel(&mut trees, &mut evaluator, 12, 4).unwrap();
+        SearchWorkspace::new(4)
+            .run_parallel(&mut trees, &mut evaluator, 12)
+            .unwrap();
 
         assert!(evaluator.batches.iter().any(|&size| size > 1));
         assert!(evaluator.batches.iter().all(|&size| size <= 4));
@@ -967,7 +943,11 @@ mod tests {
                 fail,
             };
 
-            assert!(run_parallel(&mut trees, &mut evaluator, 4, 4).is_err());
+            assert!(
+                SearchWorkspace::new(4)
+                    .run_parallel(&mut trees, &mut evaluator, 4)
+                    .is_err()
+            );
             assert_eq!(trees[0].pending_count(), 0);
             assert!(trees[0].nodes.iter().all(|node| node.reservations == 0));
             assert!(trees[0].edges.iter().all(|edge| edge.reservations == 0));
@@ -985,7 +965,9 @@ mod tests {
             invalid: false,
             fail: false,
         };
-        run_batched(&mut batched, &mut evaluator, 11, 4).unwrap();
+        SearchWorkspace::new(4)
+            .run_batched(&mut batched, &mut evaluator, 11)
+            .unwrap();
 
         assert!(evaluator.batches.is_empty());
         assert_eq!(synchronous.nodes[synchronous.root].visits, 11);
@@ -1069,7 +1051,9 @@ mod tests {
         let mut batched = (0..32)
             .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
             .collect::<Vec<_>>();
-        run_batched(&mut batched, &mut batched_evaluator, 128, 16).unwrap();
+        SearchWorkspace::new(16)
+            .run_batched(&mut batched, &mut batched_evaluator, 128)
+            .unwrap();
 
         let expected = batched[0].root_stats().collect::<Vec<_>>();
         assert!(
@@ -1159,14 +1143,15 @@ mod tests {
     fn evaluator_failure_releases_the_pending_leaf() {
         struct FailingEvaluator;
 
-        impl Evaluator<Board> for FailingEvaluator {
+        impl BatchEvaluator<Board> for FailingEvaluator {
             type Error = &'static str;
 
-            fn evaluate(
+            fn evaluate_batch(
                 &mut self,
-                _game: &Board,
+                _games: &[Board],
                 _policy_logits: &mut [f32],
-            ) -> Result<f32, Self::Error> {
+                _values: &mut [f32],
+            ) -> Result<(), Self::Error> {
                 Err("failed")
             }
         }
@@ -1211,17 +1196,19 @@ mod tests {
             calls: usize,
         }
 
-        impl Evaluator<Board> for CountingEvaluator {
+        impl BatchEvaluator<Board> for CountingEvaluator {
             type Error = Infallible;
 
-            fn evaluate(
+            fn evaluate_batch(
                 &mut self,
-                _game: &Board,
+                games: &[Board],
                 policy_logits: &mut [f32],
-            ) -> Result<f32, Self::Error> {
-                self.calls += 1;
+                values: &mut [f32],
+            ) -> Result<(), Self::Error> {
+                self.calls += games.len();
                 policy_logits.fill(0.0);
-                Ok(0.0)
+                values.fill(0.0);
+                Ok(())
             }
         }
 

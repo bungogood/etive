@@ -84,8 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let device = candle_device()?;
             let previous = OthelloNetwork::load(previous, &device)?;
             let contender = OthelloNetwork::load(contender, &device)?;
-            let mut previous = OthelloCandleEvaluator::from_network(device.clone(), previous);
-            let mut contender = OthelloCandleEvaluator::from_network(device, contender);
+            let mut previous = OthelloCandleEvaluator::from_network(device.clone(), &previous);
+            let mut contender = OthelloCandleEvaluator::from_network(device, &contender);
             let start = Instant::now();
             let mut last_progress = Instant::now();
             let result = evaluate(
@@ -144,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let device = candle_device()?;
                 let network = OthelloNetwork::load(path, &device)?;
-                let evaluator = OthelloCandleEvaluator::from_network(device, network);
+                let evaluator = OthelloCandleEvaluator::from_network(device, &network);
                 gtp::run_with_evaluator(
                     stdin.lock(),
                     stdout.lock(),

@@ -111,10 +111,7 @@ struct WorkerConfig {
     temperature_moves: usize,
 }
 
-pub fn run(
-    evaluator: OthelloCandleEvaluator,
-    config: ActorConfig,
-) -> Result<(ActorRun, OthelloCandleEvaluator), ActorError> {
+pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<ActorRun, ActorError> {
     if config.games == 0
         || config.simulations < 2
         || config.workers == 0
@@ -197,22 +194,19 @@ pub fn run(
         }
     }
     let inference = inference.join().map_err(|_| ActorError::WorkerPanicked)?;
-    let (evaluator, evaluations, batches) = inference?;
+    let (evaluations, batches) = inference?;
     if let Some(error) = worker_error {
         return Err(error);
     }
 
-    Ok((
-        ActorRun {
-            first_game_actions,
-            draws,
-            evaluations,
-            batches,
-            unique_games: trajectory_hashes.into_iter().collect::<HashSet<_>>().len(),
-            samples,
-        },
-        evaluator,
-    ))
+    Ok(ActorRun {
+        first_game_actions,
+        draws,
+        evaluations,
+        batches,
+        unique_games: trajectory_hashes.into_iter().collect::<HashSet<_>>().len(),
+        samples,
+    })
 }
 
 fn run_inference(
@@ -220,7 +214,7 @@ fn run_inference(
     batch_size: usize,
     requests: Receiver<InferenceRequest>,
     responses: Vec<SyncSender<InferenceResponse>>,
-) -> Result<(OthelloCandleEvaluator, u64, u64), ActorError> {
+) -> Result<(u64, u64), ActorError> {
     let mut batch = InferenceBatch::new(batch_size);
 
     while let Ok(first) = requests.recv() {
@@ -251,7 +245,7 @@ fn run_inference(
 
     let evaluations = evaluator.evaluations();
     let batches = evaluator.batches();
-    Ok((evaluator, evaluations, batches))
+    Ok((evaluations, batches))
 }
 
 fn push_inference_request(
@@ -478,7 +472,7 @@ mod tests {
     #[test]
     fn actor_workers_complete_games_through_one_inference_owner() {
         let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
-        let (result, _) = run(
+        let result = run(
             evaluator,
             ActorConfig {
                 games: 2,

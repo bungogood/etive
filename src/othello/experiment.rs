@@ -190,7 +190,7 @@ fn resume_run(config: Config, source: String, device: Device) -> Result<(), Box<
 fn run_loop(
     config: Config,
     device: Device,
-    mut network: OthelloNetwork,
+    network: OthelloNetwork,
     mut trainer: TrainingSession,
     mut replay: VecDeque<Vec<SelfPlaySample>>,
     mut generation: usize,
@@ -222,8 +222,8 @@ fn run_loop(
             println!("generation {generation}: starting self-play");
             io::stdout().flush()?;
             let self_play_start = Instant::now();
-            let (self_play, evaluator) = run_actors(
-                OthelloCandleEvaluator::from_network(device.clone(), network),
+            let self_play = run_actors(
+                OthelloCandleEvaluator::from_network(device.clone(), &network),
                 ActorConfig {
                     games: config.self_play.games,
                     simulations: config.self_play.simulations,
@@ -236,7 +236,6 @@ fn run_loop(
                 },
             )?;
             let self_play_elapsed = self_play_start.elapsed();
-            network = evaluator.into_network();
             let (validation, training): (Vec<_>, Vec<_>) = self_play
                 .samples
                 .into_iter()
@@ -301,8 +300,8 @@ fn run_loop(
             let previous_network =
                 OthelloNetwork::load(checkpoint_path(&config.output, generation - 1), &device)?;
             let mut previous =
-                OthelloCandleEvaluator::from_network(device.clone(), previous_network);
-            let mut current = OthelloCandleEvaluator::from_network(device.clone(), network);
+                OthelloCandleEvaluator::from_network(device.clone(), &previous_network);
+            let mut current = OthelloCandleEvaluator::from_network(device.clone(), &network);
             let result = evaluate(
                 &mut current,
                 &mut previous,
@@ -315,7 +314,6 @@ fn run_loop(
                 },
                 |_| {},
             )?;
-            network = current.into_network();
             Some(result)
         } else {
             None

@@ -5,8 +5,8 @@ use candle_core::Device;
 use clap::{Parser, Subcommand};
 use etive::evaluator::OthelloCandleEvaluator;
 use etive::model::OthelloNetwork;
+use etive::othello::evaluation::{EvalConfig, evaluate};
 use etive::othello::experiment;
-use etive::othello::training::{ArenaConfig, arena_with_progress};
 use etive::othello::{Board, perft};
 
 mod gtp;
@@ -88,10 +88,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut contender = OthelloCandleEvaluator::from_network(device, contender);
             let start = Instant::now();
             let mut last_progress = Instant::now();
-            let result = arena_with_progress(
+            let result = evaluate(
                 &mut contender,
                 &mut previous,
-                ArenaConfig {
+                EvalConfig {
                     games,
                     simulations,
                     batch_size,
@@ -117,8 +117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!(
                 "eval: contender {} wins, previous {} wins, {} draws in {:.3?}",
-                result.trained_wins,
-                result.initial_wins,
+                result.candidate_wins,
+                result.baseline_wins,
                 result.draws,
                 start.elapsed()
             );

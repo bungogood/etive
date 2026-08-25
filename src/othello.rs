@@ -3,6 +3,7 @@
 pub mod actors;
 mod bitboard;
 mod board;
+pub mod evaluation;
 pub mod experiment;
 mod movegen;
 mod perft;

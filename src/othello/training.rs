@@ -1,7 +1,6 @@
-//! Othello policy/value optimization and model comparison.
+//! Othello policy/value loss calculation, optimization, and symmetry augmentation.
 
 use std::collections::HashMap;
-use std::error::Error;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -10,12 +9,10 @@ use candle_nn::{loss, ops};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use super::Board;
 use super::actors::SelfPlaySample;
-use super::{Board, Color, GameStatus};
 use crate::encoding::{OthelloEncodingV1, StateEncoder};
-use crate::evaluator::OthelloCandleEvaluator;
 use crate::game::Game;
-use crate::mcts::{Mcts, MctsConfig, SearchWorkspace};
 use crate::model::OthelloNetwork;
 
 #[derive(Clone, Copy, Debug)]
@@ -57,30 +54,6 @@ struct RestorableAdamW {
     beta2: f64,
     epsilon: f64,
     weight_decay: f64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ArenaResult {
-    pub trained_wins: usize,
-    pub initial_wins: usize,
-    pub draws: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ArenaProgress {
-    pub completed: usize,
-    pub total: usize,
-    pub moves: usize,
-    pub evaluations: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ArenaConfig {
-    pub games: usize,
-    pub simulations: u32,
-    pub batch_size: usize,
-    pub opening_plies: usize,
-    pub seed: u64,
 }
 
 pub fn evaluate_loss(
@@ -384,121 +357,6 @@ fn transform_square(index: usize, symmetry: usize) -> usize {
     row * 8 + column
 }
 
-pub fn arena_with_progress(
-    trained: &mut OthelloCandleEvaluator,
-    initial: &mut OthelloCandleEvaluator,
-    config: ArenaConfig,
-    mut report_progress: impl FnMut(ArenaProgress),
-) -> Result<ArenaResult, Box<dyn Error>> {
-    let ArenaConfig {
-        games,
-        simulations,
-        batch_size,
-        opening_plies,
-        seed,
-    } = config;
-    if games == 0 || !games.is_multiple_of(2) || simulations < 2 || batch_size == 0 {
-        return Err(
-            "arena games must be positive and even, simulations at least two, and batch size positive"
-                .into(),
-        );
-    }
-
-    let mut result = ArenaResult::default();
-    let initial_evaluations = initial.evaluations();
-    let trained_evaluations = trained.evaluations();
-    let mut moves = 0;
-    let mut boards = arena_openings(games, opening_plies, seed);
-    let mut workspace = SearchWorkspace::new(batch_size);
-
-    while result.trained_wins + result.initial_wins + result.draws < games {
-        let mut initial_turn = Vec::with_capacity(games / 2);
-        let mut trained_turn = Vec::with_capacity(games / 2);
-        for (index, (board, initial_color)) in boards.iter().enumerate() {
-            if board.outcome().is_some() {
-                continue;
-            }
-            if board.side_to_move() == *initial_color {
-                initial_turn.push(index);
-            } else {
-                trained_turn.push(index);
-            }
-        }
-
-        search_moves(
-            &mut workspace,
-            initial,
-            &mut boards,
-            &initial_turn,
-            simulations,
-        )?;
-        search_moves(
-            &mut workspace,
-            trained,
-            &mut boards,
-            &trained_turn,
-            simulations,
-        )?;
-        moves += initial_turn.len() + trained_turn.len();
-
-        for index in initial_turn.into_iter().chain(trained_turn) {
-            let (board, initial_color) = boards[index];
-            match board.status() {
-                GameStatus::Drawn => result.draws += 1,
-                GameStatus::Won(winner) if winner == initial_color => result.initial_wins += 1,
-                GameStatus::Won(_) => result.trained_wins += 1,
-                GameStatus::Ongoing => {}
-            }
-        }
-        report_progress(ArenaProgress {
-            completed: result.trained_wins + result.initial_wins + result.draws,
-            total: games,
-            moves,
-            evaluations: initial.evaluations().saturating_sub(initial_evaluations)
-                + trained.evaluations().saturating_sub(trained_evaluations),
-        });
-    }
-    Ok(result)
-}
-
-fn arena_openings(games: usize, opening_plies: usize, seed: u64) -> Vec<(Board, Color)> {
-    let mut random = StdRng::seed_from_u64(seed);
-    let mut boards = Vec::with_capacity(games);
-    for _ in 0..games / 2 {
-        let mut board = Board::default();
-        for _ in 0..opening_plies {
-            if board.outcome().is_some() {
-                break;
-            }
-            let actions = board.legal_actions().collect::<Vec<_>>();
-            let action = actions[random.random_range(0..actions.len())];
-            board.play_unchecked(action);
-        }
-        boards.push((board, Color::Black));
-        boards.push((board, Color::White));
-    }
-    boards
-}
-
-fn search_moves(
-    workspace: &mut SearchWorkspace<Board>,
-    evaluator: &mut OthelloCandleEvaluator,
-    boards: &mut [(Board, Color)],
-    game_indices: &[usize],
-    simulations: u32,
-) -> Result<(), Box<dyn Error>> {
-    let mut searches = game_indices
-        .iter()
-        .map(|&index| Mcts::new(boards[index].0, MctsConfig::default()))
-        .collect::<Vec<_>>();
-    workspace.run_batched(&mut searches, evaluator, simulations)?;
-    for (&game_index, search) in game_indices.iter().zip(searches) {
-        let action = search.best_action().ok_or("arena search found no action")?;
-        boards[game_index].0.play_unchecked(action);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::game::Outcome;
@@ -526,23 +384,6 @@ mod tests {
         assert_eq!(report.steps, 1);
         assert!(report.policy_loss.is_finite());
         assert!(report.value_loss.is_finite());
-    }
-
-    #[test]
-    fn arena_openings_are_diverse_and_color_paired() {
-        let openings = arena_openings(10, 8, 7);
-
-        assert_eq!(openings.len(), 10);
-        for pair in openings.as_chunks::<2>().0 {
-            assert_eq!(pair[0].0, pair[1].0);
-            assert_eq!(pair[0].1, Color::Black);
-            assert_eq!(pair[1].1, Color::White);
-        }
-        assert!(
-            openings[2..]
-                .iter()
-                .any(|opening| opening.0 != openings[0].0)
-        );
     }
 
     #[test]

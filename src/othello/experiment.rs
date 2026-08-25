@@ -11,7 +11,8 @@ use candle_core::Device;
 use serde::{Deserialize, Serialize};
 
 use super::actors::{ActorConfig, SelfPlaySample, run as run_actors};
-use super::training::{ArenaConfig, TrainingSession, arena_with_progress, evaluate_loss};
+use super::evaluation::{EvalConfig, evaluate};
+use super::training::{TrainingSession, evaluate_loss};
 use super::{BitBoard, Board, Color};
 use crate::evaluator::OthelloCandleEvaluator;
 use crate::game::Outcome;
@@ -300,10 +301,10 @@ fn run_loop(
             let mut previous =
                 OthelloCandleEvaluator::from_network(device.clone(), previous_network);
             let mut current = OthelloCandleEvaluator::from_network(device.clone(), network);
-            let result = arena_with_progress(
+            let result = evaluate(
                 &mut current,
                 &mut previous,
-                ArenaConfig {
+                EvalConfig {
                     games: config.eval.games,
                     simulations: config.eval.simulations,
                     batch_size: config.self_play.inference_batch_size,
@@ -320,18 +321,18 @@ fn run_loop(
 
         let (current_wins, previous_wins, draws, score) = match evaluation {
             Some(result) => {
-                let score = (result.trained_wins as f32 + 0.5 * result.draws as f32)
+                let score = (result.candidate_wins as f32 + 0.5 * result.draws as f32)
                     / config.eval.games as f32;
                 println!(
                     "generation {generation}: evaluation {}-{}-{}, score {:.1}%",
-                    result.trained_wins,
-                    result.initial_wins,
+                    result.candidate_wins,
+                    result.baseline_wins,
                     result.draws,
                     score * 100.0
                 );
                 (
-                    result.trained_wins,
-                    result.initial_wins,
+                    result.candidate_wins,
+                    result.baseline_wins,
                     result.draws,
                     score,
                 )

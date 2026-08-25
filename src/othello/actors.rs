@@ -38,7 +38,7 @@ pub struct ActorRun {
     pub samples: Vec<SelfPlaySample>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(bincode::Decode, bincode::Encode, Clone, Debug)]
 pub struct SelfPlaySample {
     pub position: Board,
     pub policy: [f32; 65],

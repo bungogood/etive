@@ -1,7 +1,7 @@
 //! Shared contracts for deterministic two-player games.
 
 /// A terminal result from the perspective of the player to move.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(bincode::Decode, bincode::Encode, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Outcome {
     Win,
     Draw,

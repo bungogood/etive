@@ -11,7 +11,7 @@ use super::{BitBoard, BitBoardIter, Square};
 const INITIAL_BLACK: u64 = 0x0000_0008_1000_0000;
 const INITIAL_WHITE: u64 = 0x0000_0010_0800_0000;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(bincode::Decode, bincode::Encode, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub enum Color {
     Black,
@@ -121,7 +121,7 @@ impl fmt::Display for BoardError {
 
 impl std::error::Error for BoardError {}
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(bincode::Decode, bincode::Encode, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Board {
     player: u64,
     opponent: u64,

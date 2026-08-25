@@ -78,6 +78,17 @@ struct RunState {
     elapsed_seconds: f64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct PendingSelfPlay {
+    generation: usize,
+    samples: usize,
+    training_samples: usize,
+    validation_samples: usize,
+    elapsed_seconds: f64,
+    evaluations: u64,
+    unique_games: usize,
+}
+
 pub fn run(
     config_path: impl AsRef<Path>,
     device: Device,
@@ -140,11 +151,22 @@ fn resume_run(
     device: Device,
 ) -> Result<(), Box<dyn Error>> {
     let stored_config = fs::read_to_string(config.run.output.join("config.toml"))?;
-    if stored_config != source {
-        return Err("configuration differs from the run's stored config.toml".into());
-    }
     let state: RunState =
         toml::from_str(&fs::read_to_string(config.run.output.join("state.toml"))?)?;
+    if stored_config != source {
+        fs::write(
+            config.run.output.join(format!(
+                "config-before-resume-generation-{:04}.toml",
+                state.generation
+            )),
+            stored_config,
+        )?;
+        fs::write(config.run.output.join("config.toml"), &source)?;
+        println!(
+            "configuration changed; archived the previous config at generation {}",
+            state.generation
+        );
+    }
     repair_metrics(&config.run.output.join("metrics.csv"), state.generation)?;
     let network = OthelloNetwork::load(
         checkpoint_path(&config.run.output, state.generation),
@@ -192,46 +214,93 @@ fn run_loop(
     let state_path = config.run.output.join("state.toml");
     let metrics_path = config.run.output.join("metrics.csv");
     let mut generation = current_generation(&state_path)?;
+    let mut recovered_elapsed = 0.0;
 
-    while prior_elapsed + run_start.elapsed().as_secs_f64() < run_seconds {
+    while prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64() < run_seconds {
         generation += 1;
-        println!("generation {generation}: starting self-play");
-        io::stdout().flush()?;
-        let self_play_start = Instant::now();
-        let (self_play, evaluator) = run_actors(
-            OthelloCandleEvaluator::from_network(device.clone(), network),
-            ActorConfig {
-                games: config.self_play.games,
-                simulations: config.self_play.simulations,
-                workers: config.self_play.workers,
-                inference_batch_size: config.self_play.inference_batch_size,
-                seed: config.run.seed.wrapping_add(generation as u64),
-                dirichlet_alpha: config.self_play.dirichlet_alpha,
-                dirichlet_fraction: config.self_play.dirichlet_fraction,
-                temperature_moves: config.self_play.temperature_moves,
-            },
-        )?;
-        let self_play_elapsed = self_play_start.elapsed();
-        network = evaluator.into_network();
-        let sample_count = self_play.samples.len();
-        let evaluations = self_play.evaluations;
-        let unique_games = self_play.unique_games;
-        let (validation, training): (Vec<_>, Vec<_>) = self_play
-            .samples
-            .into_iter()
-            .partition(|sample| sample.game % config.training.validation_game_modulus == 0);
-        let training_sample_count = training.len();
-        let validation_sample_count = validation.len();
-        atomic_replay_save(&training, &replay_path(&config.run.output, generation))?;
+        let pending_path = config.run.output.join("pending-self-play.toml");
+        let training_path = replay_path(&config.run.output, generation);
+        let validation_path = validation_replay_path(&config.run.output, generation);
+        let (training, validation, pending) = if training_path.exists() {
+            let training = read_replay(&training_path)?;
+            let validation = if validation_path.exists() {
+                read_replay(&validation_path)?
+            } else {
+                Vec::new()
+            };
+            let pending = if pending_path.exists() {
+                toml::from_str::<PendingSelfPlay>(&fs::read_to_string(&pending_path)?)?
+            } else {
+                PendingSelfPlay {
+                    generation,
+                    samples: training.len() + validation.len(),
+                    training_samples: training.len(),
+                    validation_samples: validation.len(),
+                    elapsed_seconds: 0.0,
+                    evaluations: 0,
+                    unique_games: 0,
+                }
+            };
+            if pending.generation != generation {
+                return Err("pending self-play generation does not match run state".into());
+            }
+            recovered_elapsed += pending.elapsed_seconds;
+            println!(
+                "generation {generation}: recovered {} persisted self-play positions",
+                pending.samples
+            );
+            (training, validation, pending)
+        } else {
+            println!("generation {generation}: starting self-play");
+            io::stdout().flush()?;
+            let self_play_start = Instant::now();
+            let (self_play, evaluator) = run_actors(
+                OthelloCandleEvaluator::from_network(device.clone(), network),
+                ActorConfig {
+                    games: config.self_play.games,
+                    simulations: config.self_play.simulations,
+                    workers: config.self_play.workers,
+                    inference_batch_size: config.self_play.inference_batch_size,
+                    seed: config.run.seed.wrapping_add(generation as u64),
+                    dirichlet_alpha: config.self_play.dirichlet_alpha,
+                    dirichlet_fraction: config.self_play.dirichlet_fraction,
+                    temperature_moves: config.self_play.temperature_moves,
+                },
+            )?;
+            let self_play_elapsed = self_play_start.elapsed();
+            network = evaluator.into_network();
+            let (validation, training): (Vec<_>, Vec<_>) = self_play
+                .samples
+                .into_iter()
+                .partition(|sample| sample.game % config.training.validation_game_modulus == 0);
+            let pending = PendingSelfPlay {
+                generation,
+                samples: training.len() + validation.len(),
+                training_samples: training.len(),
+                validation_samples: validation.len(),
+                elapsed_seconds: self_play_elapsed.as_secs_f64(),
+                evaluations: self_play.evaluations,
+                unique_games: self_play.unique_games,
+            };
+            atomic_replay_save(&training, &training_path)?;
+            atomic_replay_save(&validation, &validation_path)?;
+            atomic_toml_save(&pending_path, &pending)?;
+            (training, validation, pending)
+        };
+        let sample_count = pending.samples;
+        let training_sample_count = pending.training_samples;
+        let validation_sample_count = pending.validation_samples;
+        let evaluations = pending.evaluations;
+        let unique_games = pending.unique_games;
         replay.push_back(training);
         trim_replay(&mut replay, config.training.replay_positions);
         let replay_samples = replay.iter().map(Vec::len).sum::<usize>();
         println!(
             "generation {generation}: generated {sample_count} positions from {unique_games} unique games in {:.3?}",
-            self_play_elapsed
+            Duration::from_secs_f64(pending.elapsed_seconds)
         );
 
-        let total_elapsed = prior_elapsed + run_start.elapsed().as_secs_f64();
+        let total_elapsed = prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64();
         let progress = (total_elapsed / run_seconds).min(1.0);
         let learning_rate = config.training.learning_rate
             * (config.training.final_learning_rate / config.training.learning_rate).powf(progress);
@@ -312,8 +381,8 @@ fn run_loop(
             &metrics_path,
             format!(
                 "{generation},{sample_count},{training_sample_count},{validation_sample_count},{replay_samples},{:.6},{evaluations},{:.3},{learning_rate:.8},{},{:.6},{:.6},{:.6},{validation_policy:.6},{validation_value:.6},{},{current_wins},{previous_wins},{draws},{score:.6},{}",
-                self_play_elapsed.as_secs_f64(),
-                evaluations as f64 / self_play_elapsed.as_secs_f64(),
+                pending.elapsed_seconds,
+                evaluations as f64 / pending.elapsed_seconds.max(f64::MIN_POSITIVE),
                 training_report.steps,
                 training_report.elapsed.as_secs_f64(),
                 training_report.policy_loss,
@@ -326,13 +395,23 @@ fn run_loop(
             &state_path,
             RunState {
                 generation,
-                elapsed_seconds: prior_elapsed + run_start.elapsed().as_secs_f64(),
+                elapsed_seconds: prior_elapsed
+                    + recovered_elapsed
+                    + run_start.elapsed().as_secs_f64(),
             },
         )?;
+        if pending_path.exists() {
+            fs::remove_file(&pending_path)?;
+        }
+        if validation_path.exists() {
+            fs::remove_file(&validation_path)?;
+        }
     }
     println!(
         "experiment completed at generation {generation} after {:.3?}",
-        Duration::from_secs_f64(prior_elapsed + run_start.elapsed().as_secs_f64())
+        Duration::from_secs_f64(
+            prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64(),
+        )
     );
     Ok(())
 }
@@ -554,8 +633,12 @@ fn atomic_optimizer_save(trainer: &TrainingSession, path: &Path) -> candle_core:
 }
 
 fn atomic_state_save(path: &Path, state: RunState) -> Result<(), Box<dyn Error>> {
+    atomic_toml_save(path, &state)
+}
+
+fn atomic_toml_save(path: &Path, value: &impl Serialize) -> Result<(), Box<dyn Error>> {
     let temporary = temporary_path(path);
-    fs::write(&temporary, toml::to_string(&state)?)?;
+    fs::write(&temporary, toml::to_string(value)?)?;
     fs::rename(temporary, path)?;
     Ok(())
 }
@@ -578,6 +661,12 @@ fn replay_path(output: &Path, generation: usize) -> PathBuf {
     output
         .join("replay")
         .join(format!("generation-{generation:04}.bin"))
+}
+
+fn validation_replay_path(output: &Path, generation: usize) -> PathBuf {
+    output
+        .join("replay")
+        .join(format!("generation-{generation:04}-validation.bin"))
 }
 
 #[cfg(test)]

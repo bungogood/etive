@@ -105,8 +105,9 @@ cargo run --release --features cudnn -- learn experiments/residual-10x128-24h.to
 ```
 
 Relative checkpoint and output paths are resolved from the configuration file's
-directory. A run copies its configuration into the output directory and refuses
-to resume if that configuration has changed.
+directory. A run copies its configuration into the output directory. If a
+resume changes that configuration, the previous version is archived beside the
+run before the new settings take effect.
 
 ### Tic-Tac-Toe Validation
 

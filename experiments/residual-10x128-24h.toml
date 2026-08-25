@@ -11,13 +11,13 @@ start_generation = 0
 games = 4096
 simulations = 256
 workers = 8
-inference_batch_size = 4096
+inference_batch_size = 1024
 dirichlet_alpha = 0.3
 dirichlet_fraction = 0.25
 temperature_moves = 20
 
 [training]
-batch_size = 1024
+batch_size = 256
 replay_positions = 4000000
 replay_reuse = 4
 learning_rate = 0.001

@@ -12,7 +12,7 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma};
 
 use super::{Board, Color, GameStatus};
-use crate::evaluator::{BatchEvaluator, OthelloCandleEvaluator};
+use crate::evaluator::{InferenceBatch, OthelloCandleEvaluator};
 use crate::game::{Game, Outcome};
 use crate::mcts::{EvaluationRequest, Mcts, MctsConfig, MctsError, Selection};
 
@@ -89,6 +89,12 @@ struct InferenceResponse {
     request: EvaluationRequest,
     policy: [f32; 65],
     value: f32,
+}
+
+struct InferenceTag {
+    worker: usize,
+    tree: usize,
+    request: EvaluationRequest,
 }
 
 struct ActorGame {
@@ -233,38 +239,31 @@ fn run_inference(
     requests: Receiver<InferenceRequest>,
     responses: Vec<Sender<InferenceResponse>>,
 ) -> Result<(OthelloCandleEvaluator, u64, u64), ActorError> {
-    let mut batch = Vec::with_capacity(batch_size);
-    let mut positions = Vec::with_capacity(batch_size);
-    let mut policies = Vec::with_capacity(batch_size * Board::ACTION_COUNT);
-    let mut values = Vec::with_capacity(batch_size);
+    let mut batch = InferenceBatch::new(batch_size);
 
     while let Ok(first) = requests.recv() {
         batch.clear();
-        positions.clear();
-        batch.push(first);
-        while batch.len() < batch_size {
+        push_inference_request(&mut batch, first);
+        while !batch.is_full() {
             match requests.recv_timeout(Duration::from_micros(100)) {
-                Ok(request) => batch.push(request),
+                Ok(request) => push_inference_request(&mut batch, request),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         }
-        positions.extend(batch.iter().map(|request| request.position));
-        policies.resize(batch.len() * Board::ACTION_COUNT, 0.0);
-        values.resize(batch.len(), 0.0);
-        evaluator
-            .evaluate_batch(&positions, &mut policies, &mut values)
+        batch
+            .evaluate(&mut evaluator)
             .map_err(ActorError::Evaluator)?;
 
-        for (index, request) in batch.iter().enumerate() {
-            let start = index * Board::ACTION_COUNT;
+        for index in 0..batch.len() {
+            let (request, logits, value) = batch.result(index);
             let mut policy = [0.0; 65];
-            policy.copy_from_slice(&policies[start..start + Board::ACTION_COUNT]);
+            policy.copy_from_slice(logits);
             let _ = responses[request.worker].send(InferenceResponse {
                 tree: request.tree,
                 request: request.request,
                 policy,
-                value: values[index],
+                value,
             });
         }
     }
@@ -272,6 +271,20 @@ fn run_inference(
     let evaluations = evaluator.evaluations();
     let batches = evaluator.batches();
     Ok((evaluator, evaluations, batches))
+}
+
+fn push_inference_request(
+    batch: &mut InferenceBatch<Board, InferenceTag>,
+    request: InferenceRequest,
+) {
+    assert!(batch.push(
+        InferenceTag {
+            worker: request.worker,
+            tree: request.tree,
+            request: request.request,
+        },
+        request.position,
+    ));
 }
 
 fn run_worker(
@@ -326,6 +339,7 @@ fn run_worker(
                 game.trajectory_hash = game.trajectory_hash.wrapping_mul(0x0000_0100_0000_01b3)
                     ^ Board::action_index(action) as u64;
                 assert!(game.tree.advance(action));
+                assert!(game.tree.rebase_root());
                 game.simulations = 0;
                 game.root_noise_applied = false;
                 progressed = true;
@@ -362,6 +376,7 @@ fn run_worker(
                         .map_err(|_| ActorError::InferenceStopped)?;
                     progressed = true;
                 }
+                Selection::Blocked => {}
             }
         }
 

@@ -53,6 +53,9 @@ enum Command {
         /// Simulations performed before each generated move.
         #[arg(long, default_value_t = 128)]
         simulations: u32,
+        /// Maximum leaves evaluated together during parallel search.
+        #[arg(long, default_value_t = 128)]
+        batch_size: usize,
     },
     /// Play Othello games with random Candle evaluation and MCTS.
     Mcts {
@@ -167,17 +170,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Gtp {
             checkpoint,
             simulations,
+            batch_size,
         } => {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             if let Some(path) = checkpoint {
-                if simulations < 2 {
-                    return Err("simulations must be at least two".into());
+                if simulations < 2 || batch_size == 0 {
+                    return Err("simulations must be at least two and batch size positive".into());
                 }
                 let device = candle_device()?;
                 let network = OthelloNetwork::load(path, &device)?;
                 let evaluator = OthelloCandleEvaluator::from_network(device, network);
-                gtp::run_with_evaluator(stdin.lock(), stdout.lock(), evaluator, simulations)?;
+                gtp::run_with_evaluator(
+                    stdin.lock(),
+                    stdout.lock(),
+                    evaluator,
+                    simulations,
+                    batch_size,
+                )?;
             } else {
                 gtp::run(stdin.lock(), stdout.lock())?;
             }

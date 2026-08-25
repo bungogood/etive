@@ -214,6 +214,7 @@ fn run_loop(
     let state_path = config.run.output.join("state.toml");
     let metrics_path = config.run.output.join("metrics.csv");
     let mut generation = current_generation(&state_path)?;
+    discard_committed_self_play(&config.run.output, generation)?;
     let mut recovered_elapsed = 0.0;
 
     while prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64() < run_seconds {
@@ -221,29 +222,10 @@ fn run_loop(
         let pending_path = config.run.output.join("pending-self-play.toml");
         let training_path = replay_path(&config.run.output, generation);
         let validation_path = validation_replay_path(&config.run.output, generation);
-        let (training, validation, pending) = if training_path.exists() {
-            let training = read_replay(&training_path)?;
-            let validation = if validation_path.exists() {
-                read_replay(&validation_path)?
-            } else {
-                Vec::new()
-            };
-            let pending = if pending_path.exists() {
-                toml::from_str::<PendingSelfPlay>(&fs::read_to_string(&pending_path)?)?
-            } else {
-                PendingSelfPlay {
-                    generation,
-                    samples: training.len() + validation.len(),
-                    training_samples: training.len(),
-                    validation_samples: validation.len(),
-                    elapsed_seconds: 0.0,
-                    evaluations: 0,
-                    unique_games: 0,
-                }
-            };
-            if pending.generation != generation {
-                return Err("pending self-play generation does not match run state".into());
-            }
+        let (training, validation, pending) = if let Some(recovered) =
+            recover_self_play(&pending_path, &training_path, &validation_path, generation)?
+        {
+            let (training, validation, pending) = recovered;
             recovered_elapsed += pending.elapsed_seconds;
             println!(
                 "generation {generation}: recovered {} persisted self-play positions",
@@ -414,6 +396,51 @@ fn run_loop(
         )
     );
     Ok(())
+}
+
+type RecoveredSelfPlay = (Vec<SelfPlaySample>, Vec<SelfPlaySample>, PendingSelfPlay);
+
+fn discard_committed_self_play(output: &Path, generation: usize) -> Result<(), Box<dyn Error>> {
+    let manifest_path = output.join("pending-self-play.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let pending = toml::from_str::<PendingSelfPlay>(&fs::read_to_string(&manifest_path)?)?;
+    if pending.generation <= generation {
+        fs::remove_file(manifest_path)?;
+        let validation_path = validation_replay_path(output, pending.generation);
+        if validation_path.exists() {
+            fs::remove_file(validation_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn recover_self_play(
+    manifest_path: &Path,
+    training_path: &Path,
+    validation_path: &Path,
+    generation: usize,
+) -> Result<Option<RecoveredSelfPlay>, Box<dyn Error>> {
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let pending = toml::from_str::<PendingSelfPlay>(&fs::read_to_string(manifest_path)?)?;
+    if pending.generation != generation {
+        return Err("pending self-play generation does not match run state".into());
+    }
+    if !training_path.exists() || !validation_path.exists() {
+        return Err("pending self-play manifest references missing replay data".into());
+    }
+    let training = read_replay(training_path)?;
+    let validation = read_replay(validation_path)?;
+    if pending.training_samples != training.len()
+        || pending.validation_samples != validation.len()
+        || pending.samples != training.len() + validation.len()
+    {
+        return Err("pending self-play manifest does not match replay data".into());
+    }
+    Ok(Some((training, validation, pending)))
 }
 
 fn validate(config: &ExperimentConfig) -> Result<(), Box<dyn Error>> {
@@ -698,5 +725,56 @@ mod tests {
         assert_eq!(loaded[0].policy, samples[0].policy);
         assert_eq!(loaded[0].outcome, Outcome::Win);
         assert_eq!(loaded[0].game, 42);
+    }
+
+    #[test]
+    fn recovery_requires_a_matching_committed_manifest() {
+        let output = std::env::temp_dir().join(format!("etive-recovery-{}", std::process::id()));
+        if output.exists() {
+            fs::remove_dir_all(&output).unwrap();
+        }
+        let replay = output.join("replay");
+        fs::create_dir_all(&replay).unwrap();
+        let manifest_path = output.join("pending-self-play.toml");
+        let training_path = replay_path(&output, 1);
+        let validation_path = validation_replay_path(&output, 1);
+        let sample = SelfPlaySample {
+            position: Board::default(),
+            policy: [0.0; 65],
+            outcome: Outcome::Draw,
+            game: 1,
+        };
+        atomic_replay_save(std::slice::from_ref(&sample), &training_path).unwrap();
+
+        assert!(
+            recover_self_play(&manifest_path, &training_path, &validation_path, 1)
+                .unwrap()
+                .is_none()
+        );
+
+        atomic_replay_save(&[], &validation_path).unwrap();
+        atomic_toml_save(
+            &manifest_path,
+            &PendingSelfPlay {
+                generation: 1,
+                samples: 1,
+                training_samples: 1,
+                validation_samples: 0,
+                elapsed_seconds: 1.0,
+                evaluations: 2,
+                unique_games: 1,
+            },
+        )
+        .unwrap();
+        let recovered =
+            recover_self_play(&manifest_path, &training_path, &validation_path, 1).unwrap();
+        assert_eq!(recovered.unwrap().0.len(), 1);
+
+        discard_committed_self_play(&output, 1).unwrap();
+        assert!(!manifest_path.exists());
+        assert!(!validation_path.exists());
+        assert!(training_path.exists());
+
+        fs::remove_dir_all(output).unwrap();
     }
 }

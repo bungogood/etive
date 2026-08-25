@@ -7,7 +7,7 @@ use etive::evaluator::{
     BatchEvaluator, Evaluator, OthelloCandleEvaluator, TicTacToeCandleEvaluator, UniformEvaluator,
 };
 use etive::game::Game;
-use etive::mcts::{Mcts, MctsConfig};
+use etive::mcts::{Mcts, MctsConfig, SearchWorkspace};
 use etive::model::{OthelloNetwork, TicTacToeNetwork};
 use etive::{othello, tic_tac_toe};
 
@@ -150,6 +150,18 @@ fn search(c: &mut Criterion) {
             let mut tree = Mcts::new(othello::Board::default(), MctsConfig::default());
             tree.run(&mut UniformEvaluator, simulations).unwrap();
             black_box(tree)
+        });
+    });
+
+    group.throughput(Throughput::Elements(u64::from(simulations)));
+    let mut workspace = SearchWorkspace::new(128);
+    group.bench_function("Othello uniform parallel PUCT 1024/128", |bencher| {
+        bencher.iter(|| {
+            let mut trees = [Mcts::new(othello::Board::default(), MctsConfig::default())];
+            workspace
+                .run_parallel(&mut trees, &mut UniformEvaluator, simulations)
+                .unwrap();
+            black_box(trees)
         });
     });
 

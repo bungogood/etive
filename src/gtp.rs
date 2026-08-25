@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::str::FromStr;
 
 use etive::evaluator::OthelloCandleEvaluator;
-use etive::mcts::{Mcts, MctsConfig};
+use etive::mcts::{Mcts, MctsConfig, SearchWorkspace};
 use etive::othello::{Board, Color, GameStatus, Move, Square};
 
 const COMMANDS: &[&str] = &[
@@ -34,6 +34,7 @@ pub(crate) fn run_with_evaluator(
     mut writer: impl Write,
     evaluator: OthelloCandleEvaluator,
     simulations: u32,
+    batch_size: usize,
 ) -> io::Result<()> {
     run_session(
         reader,
@@ -44,6 +45,7 @@ pub(crate) fn run_with_evaluator(
             search: Some(SearchEngine {
                 evaluator,
                 simulations,
+                workspace: SearchWorkspace::new(batch_size),
                 tree: None,
             }),
         },
@@ -78,6 +80,7 @@ struct Session {
 struct SearchEngine {
     evaluator: OthelloCandleEvaluator,
     simulations: u32,
+    workspace: SearchWorkspace<Board>,
     tree: Option<Mcts<Board>>,
 }
 
@@ -93,7 +96,12 @@ impl SearchEngine {
         let tree = self
             .tree
             .get_or_insert_with(|| Mcts::new(board, MctsConfig::default()));
-        tree.run(&mut self.evaluator, self.simulations)
+        self.workspace
+            .run_parallel(
+                std::slice::from_mut(tree),
+                &mut self.evaluator,
+                self.simulations,
+            )
             .map_err(|error| error.to_string())?;
         tree.best_action()
             .ok_or_else(|| "search found no legal action".to_owned())
@@ -186,16 +194,16 @@ impl Session {
         }
         self.require_turn(arguments[0])?;
         let mv = parse_move(arguments[1])?;
-        if !self.board.is_legal(mv) {
-            return Err("illegal move".to_owned());
-        }
-        self.apply_move(mv);
+        self.apply_move(mv)?;
         Ok(String::new())
     }
 
     fn genmove(&mut self, arguments: &[&str], play_move: bool) -> Result<String, String> {
         let color = one_argument(arguments)?;
         self.require_turn(color)?;
+        if self.board.status() != GameStatus::Ongoing {
+            return Ok("pass".to_owned());
+        }
 
         let mv = match &mut self.search {
             Some(search) => search.best_move(self.board)?,
@@ -206,17 +214,21 @@ impl Session {
             },
         };
         if play_move {
-            self.apply_move(mv);
+            self.apply_move(mv)?;
         }
         Ok(format_move(mv))
     }
 
-    fn apply_move(&mut self, mv: Move) {
-        self.history.push(self.board);
-        self.board.play_unchecked(mv);
+    fn apply_move(&mut self, mv: Move) -> Result<(), String> {
+        let previous = self.board;
+        self.board
+            .try_play(mv)
+            .map_err(|_| "illegal move".to_owned())?;
+        self.history.push(previous);
         if let Some(search) = &mut self.search {
             search.advance(mv);
         }
+        Ok(())
     }
 
     fn require_turn(&self, color: &str) -> Result<(), String> {
@@ -438,7 +450,8 @@ mod tests {
             history: Vec::new(),
             search: Some(SearchEngine {
                 evaluator,
-                simulations: 2,
+                simulations: 8,
+                workspace: SearchWorkspace::new(8),
                 tree: None,
             }),
         };
@@ -459,6 +472,8 @@ mod tests {
                 .root_position(),
             &session.board
         );
+        let search = session.search.as_ref().unwrap();
+        assert!(search.evaluator.batches() < search.evaluator.evaluations());
     }
 
     #[test]
@@ -470,6 +485,7 @@ mod tests {
             search: Some(SearchEngine {
                 evaluator,
                 simulations: 2,
+                workspace: SearchWorkspace::new(2),
                 tree: None,
             }),
         };
@@ -502,5 +518,26 @@ mod tests {
 
         session.execute("undo").unwrap();
         assert!(session.search.as_ref().unwrap().tree.is_none());
+    }
+
+    #[test]
+    fn checkpoint_search_handles_terminal_positions_without_inference() {
+        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let mut session = Session {
+            board: Board::from_discs(BitBoard::FULL, BitBoard::EMPTY, Color::White).unwrap(),
+            history: Vec::new(),
+            search: Some(SearchEngine {
+                evaluator,
+                simulations: 8,
+                workspace: SearchWorkspace::new(8),
+                tree: None,
+            }),
+        };
+
+        assert_eq!(
+            session.execute("genmove white").unwrap().render(),
+            "= pass\n\n"
+        );
+        assert_eq!(session.search.as_ref().unwrap().evaluator.evaluations(), 0);
     }
 }

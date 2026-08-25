@@ -31,6 +31,74 @@ pub trait BatchEvaluator<G: Game> {
     ) -> Result<(), Self::Error>;
 }
 
+/// Reusable contiguous storage for one bounded inference batch.
+pub struct InferenceBatch<G: Game, T> {
+    maximum: usize,
+    tags: Vec<T>,
+    positions: Vec<G>,
+    policy_logits: Vec<f32>,
+    values: Vec<f32>,
+}
+
+impl<G: Game, T> InferenceBatch<G, T> {
+    pub fn new(maximum: usize) -> Self {
+        assert!(maximum > 0, "inference batch size must be positive");
+        Self {
+            maximum,
+            tags: Vec::with_capacity(maximum),
+            positions: Vec::with_capacity(maximum),
+            policy_logits: Vec::with_capacity(maximum * G::ACTION_COUNT),
+            values: Vec::with_capacity(maximum),
+        }
+    }
+
+    pub fn push(&mut self, tag: T, position: G) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        self.tags.push(tag);
+        self.positions.push(position);
+        true
+    }
+
+    pub fn clear(&mut self) {
+        self.tags.clear();
+        self.positions.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.tags.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.tags.len() == self.maximum
+    }
+
+    pub fn tags(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
+        self.tags.iter()
+    }
+
+    pub fn evaluate<E: BatchEvaluator<G>>(&mut self, evaluator: &mut E) -> Result<(), E::Error> {
+        self.policy_logits
+            .resize(self.positions.len() * G::ACTION_COUNT, 0.0);
+        self.values.resize(self.positions.len(), 0.0);
+        evaluator.evaluate_batch(&self.positions, &mut self.policy_logits, &mut self.values)
+    }
+
+    pub fn result(&self, index: usize) -> (&T, &[f32], f32) {
+        let start = index * G::ACTION_COUNT;
+        (
+            &self.tags[index],
+            &self.policy_logits[start..start + G::ACTION_COUNT],
+            self.values[index],
+        )
+    }
+}
+
 /// A deterministic baseline with equal logits and zero value.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UniformEvaluator;

@@ -15,7 +15,7 @@ use super::{Board, Color, GameStatus};
 use crate::encoding::{OthelloEncodingV1, StateEncoder};
 use crate::evaluator::OthelloCandleEvaluator;
 use crate::game::Game;
-use crate::mcts::{Mcts, MctsConfig, run_batched};
+use crate::mcts::{Mcts, MctsConfig, SearchWorkspace};
 use crate::model::OthelloNetwork;
 
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +516,7 @@ pub fn arena_with_progress(
     let trained_evaluations = trained.evaluations();
     let mut moves = 0;
     let mut boards = arena_openings(games, opening_plies, seed);
+    let mut workspace = SearchWorkspace::new(batch_size);
 
     while result.trained_wins + result.initial_wins + result.draws < games {
         let mut initial_turn = Vec::with_capacity(games / 2);
@@ -531,8 +532,20 @@ pub fn arena_with_progress(
             }
         }
 
-        search_moves(initial, &mut boards, &initial_turn, simulations, batch_size)?;
-        search_moves(trained, &mut boards, &trained_turn, simulations, batch_size)?;
+        search_moves(
+            &mut workspace,
+            initial,
+            &mut boards,
+            &initial_turn,
+            simulations,
+        )?;
+        search_moves(
+            &mut workspace,
+            trained,
+            &mut boards,
+            &trained_turn,
+            simulations,
+        )?;
         moves += initial_turn.len() + trained_turn.len();
 
         for index in initial_turn.into_iter().chain(trained_turn) {
@@ -575,17 +588,17 @@ fn arena_openings(games: usize, opening_plies: usize, seed: u64) -> Vec<(Board, 
 }
 
 fn search_moves(
+    workspace: &mut SearchWorkspace<Board>,
     evaluator: &mut OthelloCandleEvaluator,
     boards: &mut [(Board, Color)],
     game_indices: &[usize],
     simulations: u32,
-    batch_size: usize,
 ) -> Result<(), Box<dyn Error>> {
     let mut searches = game_indices
         .iter()
         .map(|&index| Mcts::new(boards[index].0, MctsConfig::default()))
         .collect::<Vec<_>>();
-    run_batched(&mut searches, evaluator, simulations, batch_size)?;
+    workspace.run_batched(&mut searches, evaluator, simulations)?;
     for (&game_index, search) in game_indices.iter().zip(searches) {
         let action = search.best_action().ok_or("arena search found no action")?;
         boards[game_index].0.apply(action);

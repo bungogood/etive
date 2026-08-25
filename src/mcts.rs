@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::evaluator::{BatchEvaluator, Evaluator};
+use crate::evaluator::{BatchEvaluator, Evaluator, InferenceBatch};
 use crate::game::Game;
 
 static NEXT_TREE_ID: AtomicU64 = AtomicU64::new(1);
@@ -104,11 +104,14 @@ pub enum Selection<'a, G: Game> {
         request: EvaluationRequest,
         position: &'a G,
     },
+    /// Selection reached a leaf already reserved by another request.
+    Blocked,
 }
 
 struct PendingEvaluation {
     request: EvaluationRequest,
     node: usize,
+    path: Vec<(usize, usize)>,
 }
 
 /// Runs equal simulation counts across independent trees using bounded batches.
@@ -122,71 +125,128 @@ where
     G: Game,
     E: BatchEvaluator<G>,
 {
-    assert!(max_batch_size > 0, "maximum batch size must be positive");
-    let mut positions: Vec<G> = Vec::with_capacity(trees.len());
-    let mut requests: Vec<(usize, EvaluationRequest)> = Vec::with_capacity(trees.len());
-    let mut policy_logits = Vec::new();
-    let mut values = Vec::new();
+    SearchWorkspace::new(max_batch_size).run_batched(trees, evaluator, simulations)
+}
 
-    for _ in 0..simulations {
-        positions.clear();
-        requests.clear();
-        for tree_index in 0..trees.len() {
-            if trees[tree_index].root_position().outcome().is_some() {
-                continue;
-            }
-            let selection = match trees[tree_index].select() {
-                Ok(selection) => selection,
-                Err(error) => {
-                    for &(selected_tree, request) in &requests {
-                        trees[selected_tree].cancel(request);
+/// Runs leaf-parallel search across one or more trees using bounded batches.
+pub fn run_parallel<G, E>(
+    trees: &mut [Mcts<G>],
+    evaluator: &mut E,
+    simulations: u32,
+    max_batch_size: usize,
+) -> Result<(), SearchError<E::Error>>
+where
+    G: Game,
+    E: BatchEvaluator<G>,
+{
+    SearchWorkspace::new(max_batch_size).run_parallel(trees, evaluator, simulations)
+}
+
+/// Reusable scheduling and inference storage for batched MCTS calls.
+pub struct SearchWorkspace<G: Game> {
+    maximum: usize,
+    completed: Vec<u32>,
+    scheduled: Vec<u32>,
+    batch: InferenceBatch<G, (usize, EvaluationRequest)>,
+}
+
+impl<G: Game> SearchWorkspace<G> {
+    pub fn new(maximum: usize) -> Self {
+        Self {
+            maximum,
+            completed: Vec::new(),
+            scheduled: Vec::new(),
+            batch: InferenceBatch::new(maximum),
+        }
+    }
+
+    pub fn run_batched<E: BatchEvaluator<G>>(
+        &mut self,
+        trees: &mut [Mcts<G>],
+        evaluator: &mut E,
+        simulations: u32,
+    ) -> Result<(), SearchError<E::Error>> {
+        self.run(trees, evaluator, simulations, 1)
+    }
+
+    pub fn run_parallel<E: BatchEvaluator<G>>(
+        &mut self,
+        trees: &mut [Mcts<G>],
+        evaluator: &mut E,
+        simulations: u32,
+    ) -> Result<(), SearchError<E::Error>> {
+        self.run(trees, evaluator, simulations, self.maximum)
+    }
+
+    fn run<E: BatchEvaluator<G>>(
+        &mut self,
+        trees: &mut [Mcts<G>],
+        evaluator: &mut E,
+        simulations: u32,
+        max_pending_per_tree: usize,
+    ) -> Result<(), SearchError<E::Error>> {
+        if trees.iter().any(Mcts::is_pending) {
+            return Err(SearchError::Mcts(MctsError::EvaluationPending));
+        }
+        self.completed.resize(trees.len(), 0);
+        self.completed.fill(0);
+        self.scheduled.resize(trees.len(), 0);
+
+        while self.completed.iter().any(|&count| count < simulations) {
+            self.batch.clear();
+            self.scheduled.fill(0);
+            for tree_index in 0..trees.len() {
+                while self.completed[tree_index] + self.scheduled[tree_index] < simulations
+                    && (self.scheduled[tree_index] as usize) < max_pending_per_tree
+                    && !self.batch.is_full()
+                {
+                    let selection = match trees[tree_index].select() {
+                        Ok(selection) => selection,
+                        Err(error) => {
+                            for &(selected_tree, request) in self.batch.tags() {
+                                trees[selected_tree].cancel(request);
+                            }
+                            return Err(SearchError::Mcts(error));
+                        }
+                    };
+                    match selection {
+                        Selection::Terminal => self.completed[tree_index] += 1,
+                        Selection::Evaluate { request, position } => {
+                            assert!(self.batch.push((tree_index, request), *position));
+                            self.scheduled[tree_index] += 1;
+                        }
+                        Selection::Blocked => break,
                     }
-                    return Err(SearchError::Mcts(error));
                 }
-            };
-            match selection {
-                Selection::Terminal => {}
-                Selection::Evaluate { request, position } => {
-                    positions.push(*position);
-                    requests.push((tree_index, request));
+                if self.batch.is_full() {
+                    break;
                 }
             }
-        }
-        if positions.is_empty() {
-            continue;
-        }
+            if self.batch.is_empty() {
+                debug_assert!(self.completed.iter().all(|&count| count == simulations));
+                break;
+            }
 
-        policy_logits.resize(positions.len() * G::ACTION_COUNT, 0.0);
-        values.resize(positions.len(), 0.0);
-        for start in (0..positions.len()).step_by(max_batch_size) {
-            let end = (start + max_batch_size).min(positions.len());
-            if let Err(error) = evaluator.evaluate_batch(
-                &positions[start..end],
-                &mut policy_logits[start * G::ACTION_COUNT..end * G::ACTION_COUNT],
-                &mut values[start..end],
-            ) {
-                for &(tree_index, request) in &requests {
+            if let Err(error) = self.batch.evaluate(evaluator) {
+                for &(tree_index, request) in self.batch.tags() {
                     trees[tree_index].cancel(request);
                 }
                 return Err(SearchError::Evaluator(error));
             }
-        }
 
-        for (index, &(tree_index, request)) in requests.iter().enumerate() {
-            let policy_start = index * G::ACTION_COUNT;
-            if let Err(error) = trees[tree_index].complete(
-                request,
-                &policy_logits[policy_start..policy_start + G::ACTION_COUNT],
-                values[index],
-            ) {
-                for &(waiting_tree, waiting_request) in &requests[index + 1..] {
-                    trees[waiting_tree].cancel(waiting_request);
+            for index in (0..self.batch.len()).rev() {
+                let (&(tree_index, request), policy, value) = self.batch.result(index);
+                if let Err(error) = trees[tree_index].complete(request, policy, value) {
+                    for &(waiting_tree, waiting_request) in self.batch.tags().take(index) {
+                        trees[waiting_tree].cancel(waiting_request);
+                    }
+                    return Err(SearchError::Mcts(error));
                 }
-                return Err(SearchError::Mcts(error));
+                self.completed[tree_index] += 1;
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 pub struct Mcts<G: Game> {
@@ -195,8 +255,8 @@ pub struct Mcts<G: Game> {
     edges: Vec<Edge<G::Action>>,
     root: usize,
     policy_logits: Vec<f32>,
-    path: Vec<(usize, usize)>,
-    pending: Option<PendingEvaluation>,
+    pending: Vec<PendingEvaluation>,
+    free_paths: Vec<Vec<(usize, usize)>>,
     tree_id: u64,
     next_request: u64,
 }
@@ -210,8 +270,8 @@ impl<G: Game> Mcts<G> {
             edges: Vec::new(),
             root: 0,
             policy_logits: vec![0.0; G::ACTION_COUNT],
-            path: Vec::new(),
-            pending: None,
+            pending: Vec::new(),
+            free_paths: Vec::new(),
             tree_id: NEXT_TREE_ID.fetch_add(1, Ordering::Relaxed),
             next_request: 0,
         }
@@ -222,6 +282,9 @@ impl<G: Game> Mcts<G> {
         evaluator: &mut E,
         simulations: u32,
     ) -> Result<(), SearchError<E::Error>> {
+        if self.is_pending() {
+            return Err(SearchError::Mcts(MctsError::EvaluationPending));
+        }
         let mut policy_logits = std::mem::take(&mut self.policy_logits);
         let result = (|| {
             for _ in 0..simulations {
@@ -238,6 +301,7 @@ impl<G: Game> Mcts<G> {
                         self.complete(request, &policy_logits, value)
                             .map_err(SearchError::Mcts)?;
                     }
+                    Selection::Blocked => unreachable!("synchronous search has no pending request"),
                 }
             }
             Ok(())
@@ -248,10 +312,8 @@ impl<G: Game> Mcts<G> {
 
     /// Selects one leaf, immediately backing up terminal positions.
     pub fn select(&mut self) -> Result<Selection<'_, G>, MctsError> {
-        if self.pending.is_some() {
-            return Err(MctsError::EvaluationPending);
-        }
-        self.path.clear();
+        let mut path = self.free_paths.pop().unwrap_or_default();
+        path.clear();
         let mut node_index = self.root;
 
         loop {
@@ -260,8 +322,8 @@ impl<G: Game> Mcts<G> {
                     if let Some(outcome) = self.nodes[node_index].position.outcome() {
                         let value = outcome.value();
                         self.nodes[node_index].state = NodeState::Terminal(value);
-                        self.backup(node_index, value);
-                        self.path.clear();
+                        self.backup(node_index, &path, value);
+                        self.free_paths.push(path);
                         return Ok(Selection::Terminal);
                     }
                     let request = EvaluationRequest {
@@ -269,9 +331,12 @@ impl<G: Game> Mcts<G> {
                         id: self.next_request,
                     };
                     self.next_request = self.next_request.wrapping_add(1);
-                    self.pending = Some(PendingEvaluation {
+                    self.nodes[node_index].state = NodeState::Pending(request.id);
+                    self.reserve(node_index, &path);
+                    self.pending.push(PendingEvaluation {
                         request,
                         node: node_index,
+                        path,
                     });
                     return Ok(Selection::Evaluate {
                         request,
@@ -279,14 +344,18 @@ impl<G: Game> Mcts<G> {
                     });
                 }
                 NodeState::Terminal(value) => {
-                    self.backup(node_index, value);
-                    self.path.clear();
+                    self.backup(node_index, &path, value);
+                    self.free_paths.push(path);
                     return Ok(Selection::Terminal);
+                }
+                NodeState::Pending(_) => {
+                    self.free_paths.push(path);
+                    return Ok(Selection::Blocked);
                 }
                 NodeState::Expanded { start, count } => {
                     let edge_index = self.select_edge(node_index, start..start + count);
                     let child = self.materialize_child(node_index, edge_index);
-                    self.path.push((node_index, edge_index));
+                    path.push((node_index, edge_index));
                     node_index = child;
                 }
             }
@@ -300,35 +369,58 @@ impl<G: Game> Mcts<G> {
         policy_logits: &[f32],
         value: f32,
     ) -> Result<(), MctsError> {
-        let pending = self
-            .pending
-            .as_ref()
-            .ok_or(MctsError::NoEvaluationPending)?;
-        if pending.request != request {
-            return Err(MctsError::StaleRequest);
-        }
+        let pending_index = self.pending_index(request)?;
+        let mut pending = self.pending.swap_remove(pending_index);
         let node_index = pending.node;
+        debug_assert!(
+            matches!(self.nodes[node_index].state, NodeState::Pending(id) if id == request.id)
+        );
+        self.release(node_index, &pending.path);
+        self.nodes[node_index].state = NodeState::Unexpanded;
         let result = self.expand(node_index, policy_logits, value);
-        self.pending = None;
         if result.is_ok() {
-            self.backup(node_index, value);
+            self.backup(node_index, &pending.path, value);
         }
-        self.path.clear();
+        pending.path.clear();
+        self.free_paths.push(pending.path);
         result
     }
 
     /// Cancels the matching pending evaluation without changing tree statistics.
     pub fn cancel(&mut self, request: EvaluationRequest) -> bool {
-        if self.pending.as_ref().map(|pending| pending.request) != Some(request) {
+        let Ok(index) = self.pending_index(request) else {
             return false;
-        }
-        self.pending = None;
-        self.path.clear();
+        };
+        let mut pending = self.pending.swap_remove(index);
+        debug_assert!(
+            matches!(self.nodes[pending.node].state, NodeState::Pending(id) if id == request.id)
+        );
+        self.release(pending.node, &pending.path);
+        self.nodes[pending.node].state = NodeState::Unexpanded;
+        pending.path.clear();
+        self.free_paths.push(pending.path);
         true
     }
 
-    pub const fn is_pending(&self) -> bool {
-        self.pending.is_some()
+    pub fn is_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn pending_index(&self, request: EvaluationRequest) -> Result<usize, MctsError> {
+        if self.pending.is_empty() {
+            return Err(MctsError::NoEvaluationPending);
+        }
+        if self.pending.last().map(|pending| pending.request) == Some(request) {
+            return Ok(self.pending.len() - 1);
+        }
+        self.pending
+            .iter()
+            .position(|pending| pending.request == request)
+            .ok_or(MctsError::StaleRequest)
     }
 
     pub fn root_position(&self) -> &G {
@@ -370,7 +462,7 @@ impl<G: Game> Mcts<G> {
 
     /// Mixes normalized exploration noise into the current root priors.
     pub fn mix_root_priors(&mut self, noise: &[f32], fraction: f32) -> bool {
-        if self.pending.is_some() || !(0.0..=1.0).contains(&fraction) {
+        if self.is_pending() || !(0.0..=1.0).contains(&fraction) {
             return false;
         }
         let Some(range) = self.nodes[self.root].edge_range() else {
@@ -390,7 +482,7 @@ impl<G: Game> Mcts<G> {
 
     /// Advances to a legal child, retaining its subtree and reclaiming siblings.
     pub fn advance(&mut self, action: G::Action) -> bool {
-        if self.pending.is_some() {
+        if self.is_pending() {
             return false;
         }
         let Some(range) = self.nodes[self.root].edge_range() else {
@@ -408,6 +500,23 @@ impl<G: Game> Mcts<G> {
         true
     }
 
+    /// Clears decision statistics at the root while retaining its descendants.
+    pub fn rebase_root(&mut self) -> bool {
+        if self.is_pending() {
+            return false;
+        }
+        let range = self.nodes[self.root].edge_range();
+        self.nodes[self.root].visits = 0;
+        self.nodes[self.root].value_sum = 0.0;
+        if let Some(range) = range {
+            for edge in &mut self.edges[range] {
+                edge.visits = 0;
+                edge.value_sum = 0.0;
+            }
+        }
+        true
+    }
+
     fn compact(&mut self) {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -415,7 +524,6 @@ impl<G: Game> Mcts<G> {
         self.nodes = nodes;
         self.edges = edges;
         self.root = 0;
-        self.path.clear();
     }
 
     pub fn node_count(&self) -> usize {
@@ -477,14 +585,32 @@ impl<G: Game> Mcts<G> {
     }
 
     fn select_edge(&self, node_index: usize, range: Range<usize>) -> usize {
-        let parent_scale = (self.nodes[node_index].visits.max(1) as f32).sqrt();
+        let node = &self.nodes[node_index];
+        if node.reservations == 0 {
+            let parent_scale = (node.visits.max(1) as f32).sqrt();
+            let mut selected = range.start;
+            let mut selected_score = f32::NEG_INFINITY;
+            for edge_index in range {
+                let edge = &self.edges[edge_index];
+                let exploration =
+                    self.config.exploration * edge.prior * parent_scale / (1 + edge.visits) as f32;
+                let score = edge.mean_value() + exploration;
+                if score > selected_score {
+                    selected = edge_index;
+                    selected_score = score;
+                }
+            }
+            return selected;
+        }
+
+        let parent_scale = ((node.visits + node.reservations).max(1) as f32).sqrt();
         let mut selected = range.start;
         let mut selected_score = f32::NEG_INFINITY;
         for edge_index in range {
             let edge = &self.edges[edge_index];
-            let exploration =
-                self.config.exploration * edge.prior * parent_scale / (1 + edge.visits) as f32;
-            let score = edge.mean_value() + exploration;
+            let exploration = self.config.exploration * edge.prior * parent_scale
+                / (1 + edge.visits + edge.reservations) as f32;
+            let score = edge.reserved_mean_value() + exploration;
             if score > selected_score {
                 selected = edge_index;
                 selected_score = score;
@@ -505,9 +631,25 @@ impl<G: Game> Mcts<G> {
         child
     }
 
-    fn backup(&mut self, leaf: usize, mut value: f32) {
+    fn reserve(&mut self, leaf: usize, path: &[(usize, usize)]) {
+        self.nodes[leaf].reservations += 1;
+        for &(node, edge) in path {
+            self.nodes[node].reservations += 1;
+            self.edges[edge].reservations += 1;
+        }
+    }
+
+    fn release(&mut self, leaf: usize, path: &[(usize, usize)]) {
+        self.nodes[leaf].reservations -= 1;
+        for &(node, edge) in path {
+            self.nodes[node].reservations -= 1;
+            self.edges[edge].reservations -= 1;
+        }
+    }
+
+    fn backup(&mut self, leaf: usize, path: &[(usize, usize)], mut value: f32) {
         self.nodes[leaf].record(value);
-        for &(node_index, edge_index) in self.path.iter().rev() {
+        for &(node_index, edge_index) in path.iter().rev() {
             value = -value;
             self.edges[edge_index].record(value);
             self.nodes[node_index].record(value);
@@ -520,6 +662,7 @@ struct Node<G> {
     state: NodeState,
     visits: u32,
     value_sum: f32,
+    reservations: u32,
 }
 
 impl<G> Node<G> {
@@ -529,6 +672,7 @@ impl<G> Node<G> {
             state: NodeState::Unexpanded,
             visits: 0,
             value_sum: 0.0,
+            reservations: 0,
         }
     }
 
@@ -548,6 +692,7 @@ impl<G> Node<G> {
 #[derive(Clone, Copy)]
 enum NodeState {
     Unexpanded,
+    Pending(u64),
     Expanded { start: usize, count: usize },
     Terminal(f32),
 }
@@ -558,6 +703,7 @@ struct Edge<A> {
     visits: u32,
     value_sum: f32,
     child: Option<usize>,
+    reservations: u32,
 }
 
 impl<A> Edge<A> {
@@ -568,6 +714,7 @@ impl<A> Edge<A> {
             visits: 0,
             value_sum: 0.0,
             child: None,
+            reservations: 0,
         }
     }
 
@@ -576,6 +723,15 @@ impl<A> Edge<A> {
             0.0
         } else {
             self.value_sum / self.visits as f32
+        }
+    }
+
+    fn reserved_mean_value(&self) -> f32 {
+        let count = self.visits + self.reservations;
+        if count == 0 {
+            0.0
+        } else {
+            (self.value_sum - self.reservations as f32) / count as f32
         }
     }
 
@@ -599,6 +755,7 @@ fn copy_subtree<G: Game>(
         state: source.state,
         visits: source.visits,
         value_sum: source.value_sum,
+        reservations: 0,
     });
 
     let Some(source_range) = source.edge_range() else {
@@ -612,6 +769,7 @@ fn copy_subtree<G: Game>(
             visits: source_edge.visits,
             value_sum: source_edge.value_sum,
             child: None,
+            reservations: 0,
         });
     }
     nodes[target_index].state = NodeState::Expanded {
@@ -664,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn split_phase_allows_one_pending_leaf_per_tree() {
+    fn a_pending_root_blocks_colliding_selection_without_changing_stats() {
         let mut search = Mcts::new(Board::default(), MctsConfig::default());
         let request = match search.select().unwrap() {
             Selection::Evaluate { request, position } => {
@@ -672,16 +830,171 @@ mod tests {
                 request
             }
             Selection::Terminal => panic!("initial position is not terminal"),
+            Selection::Blocked => unreachable!(),
         };
 
         assert!(search.is_pending());
-        assert!(matches!(search.select(), Err(MctsError::EvaluationPending)));
+        assert_eq!(search.pending_count(), 1);
+        assert!(matches!(search.select().unwrap(), Selection::Blocked));
+        assert_eq!(search.root_value(), 0.0);
+        assert_eq!(search.nodes[search.root].visits, 0);
         assert!(!search.advance(square(0)));
 
         search.complete(request, &[0.0; 9], 0.0).unwrap();
         assert!(!search.is_pending());
         assert_eq!(search.edge_count(), 9);
         assert_eq!(search.nodes[search.root].visits, 1);
+    }
+
+    fn select_request(search: &mut Mcts<Board>) -> EvaluationRequest {
+        match search.select().unwrap() {
+            Selection::Evaluate { request, .. } => request,
+            Selection::Terminal | Selection::Blocked => panic!("expected an evaluation request"),
+        }
+    }
+
+    #[test]
+    fn distinct_leaves_can_be_pending_and_completed_out_of_order() {
+        let mut search = Mcts::new(Board::default(), MctsConfig::default());
+        search.run(&mut UniformEvaluator, 1).unwrap();
+
+        let first = select_request(&mut search);
+        let second = select_request(&mut search);
+
+        assert_eq!(search.pending_count(), 2);
+        assert_ne!(search.pending[0].node, search.pending[1].node);
+        assert!(search.root_stats().all(|stats| stats.visits == 0));
+
+        search.complete(second, &[0.0; 9], 0.25).unwrap();
+        assert_eq!(search.pending_count(), 1);
+        search.complete(first, &[0.0; 9], -0.5).unwrap();
+
+        assert_eq!(search.pending_count(), 0);
+        assert_eq!(search.nodes[search.root].visits, 3);
+        assert_eq!(
+            search.root_stats().map(|stats| stats.visits).sum::<u32>(),
+            2
+        );
+        assert!(search.nodes.iter().all(|node| node.reservations == 0));
+        assert!(search.edges.iter().all(|edge| edge.reservations == 0));
+    }
+
+    #[test]
+    fn cancelling_one_request_does_not_release_another() {
+        let mut search = Mcts::new(Board::default(), MctsConfig::default());
+        search.run(&mut UniformEvaluator, 1).unwrap();
+        let first = select_request(&mut search);
+        let second = select_request(&mut search);
+
+        assert!(search.cancel(first));
+        assert_eq!(search.pending_count(), 1);
+        assert!(matches!(
+            search.complete(first, &[0.0; 9], 0.0),
+            Err(MctsError::StaleRequest)
+        ));
+        assert_eq!(search.pending_count(), 1);
+        search.complete(second, &[0.0; 9], 0.0).unwrap();
+
+        assert_eq!(search.pending_count(), 0);
+        assert!(search.nodes.iter().all(|node| node.reservations == 0));
+        assert!(search.edges.iter().all(|edge| edge.reservations == 0));
+    }
+
+    #[test]
+    fn pending_requests_guard_advance_and_root_prior_mixing() {
+        let mut search = Mcts::new(Board::default(), MctsConfig::default());
+        search.run(&mut UniformEvaluator, 1).unwrap();
+        let request = select_request(&mut search);
+
+        assert!(!search.advance(square(0)));
+        assert!(!search.mix_root_priors(&[1.0 / 9.0; 9], 0.25));
+
+        assert!(search.cancel(request));
+        assert!(search.mix_root_priors(&[1.0 / 9.0; 9], 0.25));
+    }
+
+    struct RecordingBatchEvaluator {
+        batches: Vec<usize>,
+        invalid: bool,
+        fail: bool,
+    }
+
+    impl BatchEvaluator<Board> for RecordingBatchEvaluator {
+        type Error = &'static str;
+
+        fn evaluate_batch(
+            &mut self,
+            games: &[Board],
+            policy_logits: &mut [f32],
+            values: &mut [f32],
+        ) -> Result<(), Self::Error> {
+            self.batches.push(games.len());
+            if self.fail {
+                return Err("failed");
+            }
+            policy_logits.fill(0.0);
+            values.fill(if self.invalid { 2.0 } else { 0.0 });
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn one_tree_fills_batches_larger_than_one_and_adds_exactly_the_target() {
+        let mut trees = [Mcts::new(Board::default(), MctsConfig::default())];
+        trees[0].run(&mut UniformEvaluator, 3).unwrap();
+        let mut evaluator = RecordingBatchEvaluator {
+            batches: Vec::new(),
+            invalid: false,
+            fail: false,
+        };
+
+        run_parallel(&mut trees, &mut evaluator, 12, 4).unwrap();
+
+        assert!(evaluator.batches.iter().any(|&size| size > 1));
+        assert!(evaluator.batches.iter().all(|&size| size <= 4));
+        assert_eq!(trees[0].nodes[trees[0].root].visits, 15);
+        assert_eq!(trees[0].pending_count(), 0);
+    }
+
+    #[test]
+    fn batched_errors_cancel_every_unresolved_request() {
+        for (invalid, fail) in [(false, true), (true, false)] {
+            let mut trees = [Mcts::new(Board::default(), MctsConfig::default())];
+            trees[0].run(&mut UniformEvaluator, 1).unwrap();
+            let mut evaluator = RecordingBatchEvaluator {
+                batches: Vec::new(),
+                invalid,
+                fail,
+            };
+
+            assert!(run_parallel(&mut trees, &mut evaluator, 4, 4).is_err());
+            assert_eq!(trees[0].pending_count(), 0);
+            assert!(trees[0].nodes.iter().all(|node| node.reservations == 0));
+            assert!(trees[0].edges.iter().all(|edge| edge.reservations == 0));
+        }
+    }
+
+    #[test]
+    fn terminal_root_sync_and_batch_complete_the_same_number_of_simulations() {
+        let board = position(&[0, 3, 1, 4, 2]);
+        let mut synchronous = Mcts::new(board, MctsConfig::default());
+        synchronous.run(&mut UniformEvaluator, 11).unwrap();
+        let mut batched = [Mcts::new(board, MctsConfig::default())];
+        let mut evaluator = RecordingBatchEvaluator {
+            batches: Vec::new(),
+            invalid: false,
+            fail: false,
+        };
+        run_batched(&mut batched, &mut evaluator, 11, 4).unwrap();
+
+        assert!(evaluator.batches.is_empty());
+        assert_eq!(synchronous.nodes[synchronous.root].visits, 11);
+        assert_eq!(batched[0].nodes[batched[0].root].visits, 11);
+        assert_eq!(batched[0].root_value(), synchronous.root_value());
+        assert_eq!(
+            batched[0].root_stats().collect::<Vec<_>>(),
+            synchronous.root_stats().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -694,6 +1007,7 @@ mod tests {
             .map(|tree| match tree.select().unwrap() {
                 Selection::Evaluate { request, .. } => request,
                 Selection::Terminal => unreachable!(),
+                Selection::Blocked => unreachable!(),
             })
             .collect::<Vec<_>>();
 
@@ -719,6 +1033,7 @@ mod tests {
                     request
                 }
                 Selection::Terminal => unreachable!(),
+                Selection::Blocked => unreachable!(),
             })
             .collect::<Vec<_>>();
         let mut evaluator = TicTacToeCandleEvaluator::new(Device::Cpu, 7).unwrap();
@@ -764,10 +1079,7 @@ mod tests {
         );
         assert_eq!(batched[0].best_action(), synchronous.best_action());
         assert_eq!(expected.iter().map(|stats| stats.visits).sum::<u32>(), 127);
-        assert_eq!(
-            batched_evaluator.evaluations(),
-            batched_evaluator.batches() * 16
-        );
+        assert!(batched_evaluator.evaluations() <= batched_evaluator.batches() * 16);
     }
 
     #[test]
@@ -776,11 +1088,13 @@ mod tests {
         let first = match search.select().unwrap() {
             Selection::Evaluate { request, .. } => request,
             Selection::Terminal => unreachable!(),
+            Selection::Blocked => unreachable!(),
         };
         assert!(search.cancel(first));
         let second = match search.select().unwrap() {
             Selection::Evaluate { request, .. } => request,
             Selection::Terminal => unreachable!(),
+            Selection::Blocked => unreachable!(),
         };
 
         assert!(matches!(
@@ -799,10 +1113,12 @@ mod tests {
         let first_request = match first.select().unwrap() {
             Selection::Evaluate { request, .. } => request,
             Selection::Terminal => unreachable!(),
+            Selection::Blocked => unreachable!(),
         };
         let second_request = match second.select().unwrap() {
             Selection::Evaluate { request, .. } => request,
             Selection::Terminal => unreachable!(),
+            Selection::Blocked => unreachable!(),
         };
 
         assert_ne!(first_request.tree(), second_request.tree());
@@ -826,6 +1142,7 @@ mod tests {
                 Selection::Evaluate { request, .. } => {
                     split.complete(request, &[0.0; 9], 0.0).unwrap();
                 }
+                Selection::Blocked => unreachable!(),
             }
         }
 
@@ -972,5 +1289,23 @@ mod tests {
         assert_eq!(search.nodes[0].value_sum, retained_value);
         assert!(search.node_count() < nodes_before);
         assert!(search.edge_count() < edges_before);
+    }
+
+    #[test]
+    fn rebasing_clears_root_statistics_but_retains_the_subtree() {
+        let mut search = Mcts::new(Board::default(), MctsConfig::default());
+        search.run(&mut UniformEvaluator, 64).unwrap();
+        let action = search.best_action().unwrap();
+        assert!(search.advance(action));
+        let nodes = search.node_count();
+        let edges = search.edge_count();
+        assert!(search.nodes[search.root].visits > 0);
+
+        assert!(search.rebase_root());
+
+        assert_eq!(search.node_count(), nodes);
+        assert_eq!(search.edge_count(), edges);
+        assert_eq!(search.root_value(), 0.0);
+        assert!(search.root_stats().all(|stats| stats.visits == 0));
     }
 }

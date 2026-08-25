@@ -67,12 +67,13 @@ Egaroucid:
 
 ```bash
 cargo run --release -- gtp
-cargo run --release --features cudnn -- gtp --checkpoint checkpoints/model.safetensors
+cargo run --release --features cudnn -- gtp --checkpoint checkpoints/model.safetensors --batch-size 128
 ```
 
 Without a checkpoint the protocol player selects the first legal move for rules
-testing. With a checkpoint it uses MCTS. Diagnostics must go to stderr while
-GTP is active because stdout is reserved for protocol responses.
+testing. With a checkpoint it uses persistent, leaf-parallel MCTS and batches up
+to `--batch-size` positions in each network invocation. Diagnostics must go to
+stderr while GTP is active because stdout is reserved for protocol responses.
 
 ## Random Candle Search
 

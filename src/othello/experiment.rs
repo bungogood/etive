@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::{self, File};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use burn::tensor::Device;
 use tracing::{info, info_span, warn};
@@ -476,9 +476,6 @@ fn evaluate_generation(
     let mut previous = OthelloBurnEvaluator::from_network(device.clone(), &previous_network);
     drop(previous_network);
     let mut current = OthelloBurnEvaluator::from_network(device.clone(), network);
-    let start = Instant::now();
-    let mut last_progress = start;
-    let mut last_evaluations = 0;
     evaluate(
         &mut current,
         &mut previous,
@@ -488,29 +485,6 @@ fn evaluate_generation(
             batch_size: config.self_play.inference_batch_size,
             opening_plies: config.eval.opening_plies,
             seed: config.eval.seed,
-        },
-        |progress| {
-            let interval = last_progress.elapsed();
-            if interval >= Duration::from_secs(5) || progress.completed == progress.total {
-                info!(
-                    completed = progress.completed,
-                    total = progress.total,
-                    moves = progress.moves,
-                    evaluations = progress.evaluations,
-                    evaluations_per_second = %format_args!(
-                        "{:.0}",
-                        (progress.evaluations - last_evaluations) as f64 / interval.as_secs_f64()
-                    ),
-                    games_per_second = %format_args!(
-                        "{:.1}",
-                        progress.completed as f64 / start.elapsed().as_secs_f64()
-                    ),
-                    elapsed = %format_args!("{:.1}s", start.elapsed().as_secs_f64()),
-                    "generation evaluation progress"
-                );
-                last_progress = Instant::now();
-                last_evaluations = progress.evaluations;
-            }
         },
     )
     .map(Some)

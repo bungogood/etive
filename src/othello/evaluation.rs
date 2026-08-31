@@ -1,9 +1,11 @@
 //! Checkpoint comparison through color-balanced, fixed-search Othello games.
 
 use std::error::Error;
+use std::time::{Duration, Instant};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use tracing::info;
 
 use super::{Board, Color, OthelloBurnEvaluator};
 use crate::arena::{self, ArenaConfig};
@@ -24,7 +26,6 @@ pub fn evaluate(
     candidate: &mut OthelloBurnEvaluator,
     baseline: &mut OthelloBurnEvaluator,
     config: EvalConfig,
-    report_progress: impl FnMut(EvalProgress),
 ) -> Result<EvalResult, Box<dyn Error>> {
     let EvalConfig {
         games,
@@ -40,6 +41,9 @@ pub fn evaluate(
         );
     }
 
+    let start = Instant::now();
+    let mut last_progress = start;
+    let mut last_evaluations = 0;
     arena::evaluate(
         candidate,
         baseline,
@@ -48,7 +52,29 @@ pub fn evaluate(
             batch_size,
         },
         openings(games, opening_plies, seed),
-        report_progress,
+        |progress| {
+            let interval = last_progress.elapsed();
+            if interval >= Duration::from_secs(5) || progress.completed == progress.total {
+                info!(
+                    completed = progress.completed,
+                    total = progress.total,
+                    moves = progress.moves,
+                    evaluations = progress.evaluations,
+                    games_per_second = %format_args!(
+                        "{:.1}",
+                        progress.completed as f64 / start.elapsed().as_secs_f64()
+                    ),
+                    evaluations_per_second = %format_args!(
+                        "{:.0}",
+                        (progress.evaluations - last_evaluations) as f64 / interval.as_secs_f64()
+                    ),
+                    elapsed = %format_args!("{:.1}s", start.elapsed().as_secs_f64()),
+                    "evaluation progress"
+                );
+                last_progress = Instant::now();
+                last_evaluations = progress.evaluations;
+            }
+        },
     )
 }
 

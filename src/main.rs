@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use burn::tensor::Device;
 use clap::{Parser, Subcommand};
@@ -11,7 +11,6 @@ use etive::othello::{
     Board, FrozenTrainingConfig, OthelloBurnEvaluator, OthelloNetwork, diagnose_replay, perft,
     train_frozen,
 };
-use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod gtp;
@@ -153,7 +152,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut previous = OthelloBurnEvaluator::from_network(device.clone(), &previous);
             let mut contender = OthelloBurnEvaluator::from_network(device, &contender);
             let start = Instant::now();
-            let mut last_progress = Instant::now();
             let result = evaluate(
                 &mut contender,
                 &mut previous,
@@ -163,28 +161,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     batch_size,
                     opening_plies,
                     seed,
-                },
-                |progress| {
-                    let elapsed = start.elapsed();
-                    if last_progress.elapsed() >= Duration::from_secs(5)
-                        || progress.completed == progress.total
-                    {
-                        info!(
-                            completed = progress.completed,
-                            total = progress.total,
-                            moves = progress.moves,
-                            games_per_second = %format_args!(
-                                "{:.1}",
-                                progress.completed as f64 / elapsed.as_secs_f64()
-                            ),
-                            evaluations_per_second = %format_args!(
-                                "{:.0}",
-                                progress.evaluations as f64 / elapsed.as_secs_f64()
-                            ),
-                            "evaluation progress"
-                        );
-                        last_progress = Instant::now();
-                    }
                 },
             )?;
             println!(

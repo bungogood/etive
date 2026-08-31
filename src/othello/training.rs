@@ -13,7 +13,7 @@ use rand::{Rng, SeedableRng};
 use tracing::info;
 
 use super::Board;
-use super::actors::SelfPlaySample;
+use super::replay::SelfPlaySample;
 use crate::encoding::OthelloEncoding;
 use crate::game::Game;
 use crate::model::OthelloNetwork;

@@ -11,6 +11,7 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma};
 use tracing::{Span, info};
 
+pub use super::replay::SelfPlaySample;
 use super::{Board, Color, GameStatus};
 use crate::evaluator::{InferenceBatch, OthelloBurnEvaluator};
 use crate::game::{Game, Outcome};
@@ -47,14 +48,6 @@ pub struct ActorRun {
     pub inference_batches: u64,
     pub unique_games: usize,
     pub samples: Vec<SelfPlaySample>,
-}
-
-#[derive(bincode::Decode, bincode::Encode, Clone, Debug)]
-pub struct SelfPlaySample {
-    pub position: Board,
-    pub policy: [f32; Board::ACTION_COUNT],
-    pub outcome: Outcome,
-    pub game: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -10,8 +10,7 @@ use rand::rngs::StdRng;
 use rand::seq::index;
 
 use super::Board;
-use super::actors::SelfPlaySample;
-use super::experiment::replay::read_replay;
+use super::replay::{SelfPlaySample, read_replay};
 use crate::evaluator::{BatchEvaluator, OthelloBurnEvaluator};
 use crate::game::Game;
 use crate::model::{OthelloModelConfig, OthelloNetwork};

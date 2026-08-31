@@ -8,6 +8,7 @@ pub mod evaluation;
 pub mod experiment;
 mod movegen;
 mod perft;
+mod replay;
 mod square;
 pub mod training;
 

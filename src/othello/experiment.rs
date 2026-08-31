@@ -1,7 +1,5 @@
 //! TOML-configured, resumable Othello self-play experiments.
 
-pub(crate) mod replay;
-
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
@@ -14,15 +12,15 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tracing::{info, info_span, warn};
 
-use super::actors::{ActorConfig, SelfPlaySample, run as run_actors};
+use super::actors::{ActorConfig, run as run_actors};
 use super::evaluation::{EvalConfig, EvalResult, evaluate};
+use super::replay::{
+    SelfPlaySample, atomic_replay_save, load_replay, read_replay, replay_path, trim_replay,
+    validation_replay_path,
+};
 use super::training::{TrainingSession, evaluate_loss};
 use crate::evaluator::OthelloBurnEvaluator;
 use crate::model::{OthelloModelConfig, OthelloNetwork};
-
-use replay::{
-    atomic_replay_save, load_replay, read_replay, replay_path, trim_replay, validation_replay_path,
-};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -10,8 +10,8 @@ use burn::store::{ModuleRecord, RecordError};
 use burn::tensor::{Device, FloatDType, Tensor, activation};
 use serde::{Deserialize, Serialize};
 
+use super::Board as OthelloBoard;
 use crate::game::Game;
-use crate::othello::Board as OthelloBoard;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

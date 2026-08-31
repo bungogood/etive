@@ -8,7 +8,7 @@ use burn::tensor::Device;
 
 use super::replay::read_replay;
 use super::training::TrainingSession;
-use crate::model::{OthelloModelConfig, OthelloNetwork};
+use super::{OthelloModelConfig, OthelloNetwork};
 
 /// Configuration for a fixed number of training steps over immutable replay shards.
 #[derive(Clone, Debug)]

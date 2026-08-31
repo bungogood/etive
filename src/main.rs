@@ -4,13 +4,12 @@ use std::time::{Duration, Instant};
 use burn::tensor::Device;
 use clap::{Parser, Subcommand};
 use etive::evaluator::OthelloBurnEvaluator;
-use etive::model::OthelloNetwork;
 use etive::othello::actors::run as run_actors;
 use etive::othello::evaluation::{EvalConfig, evaluate};
 use etive::othello::experiment;
 use etive::othello::{
-    Board, DiagnosticsReport, FrozenTrainingConfig, FrozenTrainingReport, diagnose_replay, perft,
-    train_frozen,
+    Board, DiagnosticsReport, FrozenTrainingConfig, FrozenTrainingReport, OthelloNetwork,
+    diagnose_replay, perft, train_frozen,
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;

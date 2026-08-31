@@ -12,11 +12,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use tracing::info;
 
-use super::Board;
 use super::replay::SelfPlaySample;
-use crate::encoding::OthelloEncoding;
+use super::{Board, OthelloEncoding, OthelloNetwork};
 use crate::game::Game;
-use crate::model::OthelloNetwork;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrainingError {
@@ -329,7 +327,7 @@ fn transform_square(index: usize, symmetry: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use crate::game::Outcome;
-    use crate::model::OthelloModelConfig;
+    use crate::othello::OthelloModelConfig;
 
     use super::*;
 

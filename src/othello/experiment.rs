@@ -19,8 +19,8 @@ use super::replay::{
     validation_replay_path,
 };
 use super::training::{TrainingSession, evaluate_loss};
+use super::{OthelloModelConfig, OthelloNetwork};
 use crate::evaluator::OthelloBurnEvaluator;
-use crate::model::{OthelloModelConfig, OthelloNetwork};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

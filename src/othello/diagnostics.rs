@@ -9,10 +9,10 @@ use rand::rngs::StdRng;
 use rand::seq::index;
 
 use super::Board;
+use super::OthelloNetwork;
 use super::replay::{SelfPlaySample, read_replay};
 use crate::evaluator::{BatchEvaluator, OthelloBurnEvaluator};
 use crate::game::Game;
-use crate::model::OthelloNetwork;
 
 const ACTION_COUNT: usize = Board::ACTION_COUNT;
 

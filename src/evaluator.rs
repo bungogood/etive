@@ -6,10 +6,8 @@ use std::sync::OnceLock;
 
 use burn::tensor::{Device, FloatDType, Tensor, TensorData, TensorReadError};
 
-use crate::encoding::OthelloEncoding;
 use crate::game::Game;
-use crate::model::OthelloNetwork;
-use crate::othello;
+use crate::othello::{self, OthelloEncoding, OthelloNetwork};
 #[cfg(test)]
 use crate::tic_tac_toe::{self, minimax};
 
@@ -352,7 +350,7 @@ fn unpack_othello_output(output: &[f32], policy_logits: &mut [f32], values: &mut
 mod tests {
     use super::*;
     #[cfg(feature = "cuda")]
-    use crate::model::OthelloModelConfig;
+    use crate::othello::OthelloModelConfig;
 
     #[cfg(feature = "cuda")]
     #[test]

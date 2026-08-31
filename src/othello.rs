@@ -4,9 +4,11 @@ pub mod actors;
 mod bitboard;
 mod board;
 mod diagnostics;
+mod encoding;
 pub mod evaluation;
 pub mod experiment;
 mod frozen_training;
+mod model;
 mod movegen;
 mod perft;
 mod replay;
@@ -20,8 +22,11 @@ pub use board::{
 };
 pub use diagnostics::{DiagnosticsReport, diagnose_replay};
 pub use frozen_training::{FrozenTrainingConfig, FrozenTrainingReport, train_frozen};
+pub use model::{OthelloModelConfig, OthelloNetwork};
 pub use perft::perft;
 pub use square::{ParseSquareError, Square};
+
+pub(crate) use encoding::OthelloEncoding;
 
 use crate::game::{Game, Outcome};
 

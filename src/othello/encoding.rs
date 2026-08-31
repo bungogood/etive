@@ -1,24 +1,24 @@
 //! Allocation-free game-state encoding for neural-network batches.
 
-use crate::othello;
+use super::{Board, Square};
 
 pub struct OthelloEncoding;
 
 impl OthelloEncoding {
     pub const LEN: usize = 128;
 
-    pub fn encode(game: &othello::Board, output: &mut [f32]) {
+    pub fn encode(game: &Board, output: &mut [f32]) {
         assert_eq!(output.len(), Self::LEN);
         let side = game.side_to_move();
         encode_two_planes(
             game.discs(side).0,
             game.discs(!side).0,
-            othello::Square::COUNT,
+            Square::COUNT,
             output,
         );
     }
 
-    pub fn encode_batch(games: &[othello::Board], output: &mut [f32]) {
+    pub fn encode_batch(games: &[Board], output: &mut [f32]) {
         assert_eq!(
             output.len(),
             games.len() * Self::LEN,
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn othello_encoding_is_side_relative() {
-        let mut board = othello::Board::default();
+        let mut board = Board::default();
         let mut output = [0.0; 128];
         OthelloEncoding::encode(&board, &mut output);
 
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn batch_encoding_writes_contiguous_states() {
-        let first = othello::Board::default();
+        let first = Board::default();
         let mut second = first;
         second.play(Move::Place(OthelloSquare::new(3, 2).unwrap()));
         let mut output = vec![0.0; 2 * OthelloEncoding::LEN];
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn encoded_batch_constructs_one_burn_tensor() {
-        let games = [othello::Board::default(); 2];
+        let games = [Board::default(); 2];
         let mut output = vec![0.0; games.len() * OthelloEncoding::LEN];
         OthelloEncoding::encode_batch(&games, &mut output);
 

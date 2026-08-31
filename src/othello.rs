@@ -6,6 +6,7 @@ mod board;
 mod diagnostics;
 mod encoding;
 pub mod evaluation;
+mod evaluator;
 pub mod experiment;
 mod frozen_training;
 mod model;
@@ -21,6 +22,7 @@ pub use board::{
     Board, BoardError, GameStatus, LegalActions, Move, ParseBoardError, ParseMoveError,
 };
 pub use diagnostics::{DiagnosticsReport, diagnose_replay};
+pub use evaluator::OthelloBurnEvaluator;
 pub use frozen_training::{FrozenTrainingConfig, FrozenTrainingReport, train_frozen};
 pub use model::{OthelloModelConfig, OthelloNetwork};
 pub use perft::perft;

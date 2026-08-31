@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 
-use etive::evaluator::OthelloBurnEvaluator;
 use etive::mcts::{Mcts, SearchWorkspace};
+use etive::othello::OthelloBurnEvaluator;
 use etive::othello::{Board, Color, GameStatus, Move};
 
 macro_rules! commands {

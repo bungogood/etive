@@ -5,8 +5,8 @@ use std::error::Error;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use super::OthelloBurnEvaluator;
 use super::{Board, Color, GameStatus};
-use crate::evaluator::OthelloBurnEvaluator;
 use crate::game::Game;
 use crate::mcts::{Mcts, SearchWorkspace};
 

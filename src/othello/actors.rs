@@ -11,9 +11,10 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma};
 use tracing::{Span, info};
 
+use super::OthelloBurnEvaluator;
 pub use super::replay::SelfPlaySample;
 use super::{Board, Color, GameStatus};
-use crate::evaluator::{InferenceBatch, OthelloBurnEvaluator};
+use crate::evaluator::InferenceBatch;
 use crate::game::{Game, Outcome};
 use crate::mcts::{EvaluationRequest, Mcts, MctsError, Selection};
 

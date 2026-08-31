@@ -12,6 +12,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tracing::{info, info_span, warn};
 
+use super::OthelloBurnEvaluator;
 use super::actors::{ActorConfig, run as run_actors};
 use super::evaluation::{EvalConfig, EvalResult, evaluate};
 use super::replay::{
@@ -20,7 +21,6 @@ use super::replay::{
 };
 use super::training::{TrainingSession, evaluate_loss};
 use super::{OthelloModelConfig, OthelloNetwork};
-use crate::evaluator::OthelloBurnEvaluator;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

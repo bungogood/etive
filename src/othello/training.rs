@@ -63,14 +63,12 @@ pub fn evaluate_loss(
         let mut outcomes = vec![0.0; batch.len()];
         for (index, sample) in batch.iter().enumerate() {
             let input_start = index * OthelloEncoding::LEN;
-            OthelloEncoding::encode(
-                &sample.position,
-                &mut inputs[input_start..input_start + OthelloEncoding::LEN],
-            );
             let policy_start = index * Board::ACTION_COUNT;
-            policies[policy_start..policy_start + Board::ACTION_COUNT]
-                .copy_from_slice(&sample.policy);
-            outcomes[index] = sample.outcome.value();
+            outcomes[index] = write_sample(
+                sample,
+                &mut inputs[input_start..input_start + OthelloEncoding::LEN],
+                &mut policies[policy_start..policy_start + Board::ACTION_COUNT],
+            );
         }
         let input = tensor(&inputs, [batch.len(), 2, 8, 8], device);
         let target_policy = tensor(&policies, [batch.len(), Board::ACTION_COUNT], device);
@@ -97,7 +95,12 @@ impl TrainingSession {
         weight_decay: f32,
         seed: u64,
     ) -> Result<Self, TrainingError> {
-        if batch_size == 0 || learning_rate <= 0.0 || weight_decay < 0.0 {
+        if batch_size == 0
+            || !learning_rate.is_finite()
+            || learning_rate <= 0.0
+            || !weight_decay.is_finite()
+            || weight_decay < 0.0
+        {
             return Err(TrainingError::InvalidInput(
                 "training batch size and learning rate must be positive",
             ));
@@ -205,19 +208,17 @@ impl TrainingSession {
             }
             let sample = sample.expect("sample index must fall within replay data");
             let input_start = batch_index * OthelloEncoding::LEN;
-            OthelloEncoding::encode(
-                &sample.position,
-                &mut self.inputs[input_start..input_start + OthelloEncoding::LEN],
-            );
             let policy_start = batch_index * Board::ACTION_COUNT;
-            self.policies[policy_start..policy_start + Board::ACTION_COUNT]
-                .copy_from_slice(&sample.policy);
+            *outcome = write_sample(
+                sample,
+                &mut self.inputs[input_start..input_start + OthelloEncoding::LEN],
+                &mut self.policies[policy_start..policy_start + Board::ACTION_COUNT],
+            );
             apply_symmetry(
                 &mut self.inputs[input_start..input_start + OthelloEncoding::LEN],
                 &mut self.policies[policy_start..policy_start + Board::ACTION_COUNT],
                 self.random.random_range(0..8),
             );
-            *outcome = sample.outcome.value();
         }
 
         let input = tensor(&self.inputs, [self.batch_size, 2, 8, 8], &self.device);
@@ -255,6 +256,12 @@ impl TrainingSession {
         let losses = loss_values.into_data().try_to_vec::<f32>().unwrap();
         (losses[0], losses[1])
     }
+}
+
+fn write_sample(sample: &SelfPlaySample, input: &mut [f32], policy: &mut [f32]) -> f32 {
+    OthelloEncoding::encode(&sample.position, input);
+    policy.copy_from_slice(&sample.policy);
+    sample.outcome.value()
 }
 
 fn tensor<const D: usize>(data: &[f32], shape: [usize; D], device: &Device) -> Tensor<D> {

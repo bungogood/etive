@@ -13,77 +13,20 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, info_span, warn};
 
 use super::OthelloBurnEvaluator;
-use super::actors::{ActorConfig, run as run_actors};
+use super::OthelloNetwork;
+use super::actors::run as run_actors;
 use super::evaluation::{EvalConfig, EvalResult, evaluate};
 use super::replay::{
     SelfPlaySample, atomic_replay_save, load_replay, read_replay, replay_path, trim_replay,
     validation_replay_path,
 };
 use super::training::{TrainingSession, evaluate_loss};
-use super::{OthelloModelConfig, OthelloNetwork};
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    output: PathBuf,
-    hours: f64,
-    seed: u64,
-    checkpoint: Option<PathBuf>,
-    model: OthelloModelConfig,
-    self_play: SelfPlay,
-    train: Train,
-    eval: Eval,
-}
+mod config;
 
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SelfPlay {
-    games: usize,
-    simulations: u32,
-    workers: usize,
-    inference_batch_size: usize,
-    dirichlet_alpha: f64,
-    dirichlet_fraction: f32,
-    temperature_moves: usize,
-}
+pub use config::{SelfPlayBenchmarkConfig, load_self_play_benchmark_config};
 
-impl SelfPlay {
-    fn actor_config(self, seed: u64) -> ActorConfig {
-        ActorConfig {
-            games: self.games,
-            simulations: self.simulations,
-            workers: self.workers,
-            inference_batch_size: self.inference_batch_size,
-            seed,
-            dirichlet_alpha: self.dirichlet_alpha,
-            dirichlet_fraction: self.dirichlet_fraction,
-            temperature_moves: self.temperature_moves,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Train {
-    batch_size: usize,
-    replay_positions: usize,
-    replay_reuse: usize,
-    learning_rate: f64,
-    final_learning_rate: f64,
-    weight_decay: f32,
-    validation_game_modulus: u64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Eval {
-    interval: usize,
-    games: usize,
-    simulations: u32,
-    opening_plies: usize,
-    seed: u64,
-    promotion_los: f64,
-}
+use config::{Config, resolve_paths, validate};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -149,26 +92,6 @@ struct GenerationSelfPlay {
     validation: Vec<SelfPlaySample>,
     pending: PendingSelfPlay,
     recovered: bool,
-}
-
-pub struct SelfPlayBenchmarkConfig {
-    pub model: OthelloModelConfig,
-    pub checkpoint: Option<PathBuf>,
-    pub actor: ActorConfig,
-}
-
-pub fn load_self_play_benchmark_config(
-    config_path: impl AsRef<Path>,
-) -> Result<SelfPlayBenchmarkConfig, Box<dyn Error>> {
-    let config_path = config_path.as_ref();
-    let mut config: Config = toml::from_str(&fs::read_to_string(config_path)?)?;
-    resolve_paths(&mut config, config_path.parent().unwrap_or(Path::new(".")));
-    validate(&config)?;
-    Ok(SelfPlayBenchmarkConfig {
-        model: config.model,
-        checkpoint: config.checkpoint,
-        actor: config.self_play.actor_config(config.seed),
-    })
 }
 
 pub fn run(
@@ -691,43 +614,6 @@ fn recover_self_play(
     Ok(Some((training, validation, pending)))
 }
 
-fn validate(config: &Config) -> Result<(), Box<dyn Error>> {
-    if !config.hours.is_finite()
-        || config.hours <= 0.0
-        || !config.self_play.actor_config(config.seed).is_valid()
-        || config.train.batch_size == 0
-        || config.train.replay_positions == 0
-        || config.train.replay_reuse == 0
-        || !config.train.learning_rate.is_finite()
-        || config.train.learning_rate <= 0.0
-        || !config.train.final_learning_rate.is_finite()
-        || config.train.final_learning_rate <= 0.0
-        || !config.train.weight_decay.is_finite()
-        || config.train.weight_decay < 0.0
-        || config.train.validation_game_modulus < 2
-        || config.eval.interval == 0
-        || config.eval.games == 0
-        || !config.eval.games.is_multiple_of(2)
-        || config.eval.simulations < 2
-        || !(0.5..1.0).contains(&config.eval.promotion_los)
-        || config.model.validate().is_err()
-    {
-        return Err("invalid experiment configuration".into());
-    }
-    Ok(())
-}
-
-fn resolve_paths(config: &mut Config, base: &Path) {
-    if config.output.is_relative() {
-        config.output = base.join(&config.output);
-    }
-    if let Some(checkpoint) = &mut config.checkpoint
-        && checkpoint.is_relative()
-    {
-        *checkpoint = base.join(&*checkpoint);
-    }
-}
-
 fn acquire_run_lock(output: &Path) -> io::Result<File> {
     let path = suffixed_path(output, ".lock");
     if let Some(parent) = path.parent() {
@@ -896,68 +782,6 @@ mod tests {
     use super::*;
     use crate::game::{Game, Outcome};
     use crate::othello::Board;
-
-    const CONFIG: &str = r#"
-output = "checkpoints/run"
-hours = 24.0
-seed = 7
-
-[model]
-channels = 128
-residual_blocks = 10
-norm_groups = 8
-
-[self_play]
-games = 4096
-simulations = 256
-workers = 8
-inference_batch_size = 1024
-dirichlet_alpha = 0.3
-dirichlet_fraction = 0.25
-temperature_moves = 20
-
-[train]
-batch_size = 256
-replay_positions = 4000000
-replay_reuse = 4
-learning_rate = 0.001
-final_learning_rate = 0.0003
-weight_decay = 0.01
-validation_game_modulus = 20
-
-[eval]
-interval = 2
-games = 500
-simulations = 256
-opening_plies = 8
-seed = 4242
-promotion_los = 0.95
-"#;
-
-    #[test]
-    fn config_has_three_strict_sections() {
-        let config: Config = toml::from_str(CONFIG).unwrap();
-
-        assert_eq!(config.self_play.games, 4096);
-        assert_eq!(config.train.batch_size, 256);
-        assert_eq!(config.eval.simulations, 256);
-        assert!(validate(&config).is_ok());
-        assert!(toml::from_str::<Config>(&format!("{CONFIG}\nextra = true")).is_err());
-    }
-
-    #[test]
-    fn tracked_experiment_configs_use_the_current_schema() {
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("experiments");
-        for entry in fs::read_dir(directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|extension| extension != "toml") {
-                continue;
-            }
-            let config: Config = toml::from_str(&fs::read_to_string(&path).unwrap())
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            assert!(validate(&config).is_ok(), "{}", path.display());
-        }
-    }
 
     #[test]
     fn run_state_requires_current_explicit_fields() {

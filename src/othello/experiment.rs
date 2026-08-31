@@ -2,14 +2,11 @@
 
 use std::collections::VecDeque;
 use std::error::Error;
-use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use burn::tensor::Device;
-use fs2::FileExt;
-use serde::{Deserialize, Serialize};
 use tracing::{info, info_span, warn};
 
 use super::OthelloBurnEvaluator;
@@ -17,75 +14,23 @@ use super::OthelloNetwork;
 use super::actors::run as run_actors;
 use super::evaluation::{EvalConfig, EvalResult, evaluate};
 use super::replay::{
-    SelfPlaySample, atomic_replay_save, load_replay, read_replay, replay_path, trim_replay,
+    SelfPlaySample, atomic_replay_save, load_replay, replay_path, trim_replay,
     validation_replay_path,
 };
 use super::training::{TrainingSession, evaluate_loss};
 
 mod config;
+mod storage;
 
 pub use config::{SelfPlayBenchmarkConfig, load_self_play_benchmark_config};
 
 use config::{Config, resolve_paths, validate};
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RunState {
-    generation: usize,
-    champion_generation: usize,
-    elapsed_seconds: f64,
-}
-
-const RUN_MARKER: &str = "etive-run-v1\n";
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct GenerationMetrics {
-    generation: usize,
-    samples: usize,
-    training_samples: usize,
-    validation_samples: usize,
-    replay_samples: usize,
-    self_play_seconds: f64,
-    self_play_evaluations: u64,
-    self_play_evaluations_per_second: f64,
-    learning_rate: f64,
-    training_steps: usize,
-    training_seconds: f64,
-    policy_loss: f64,
-    policy_target_entropy: f64,
-    policy_kl: f64,
-    value_loss: f64,
-    validation_policy_loss: f64,
-    validation_policy_target_entropy: f64,
-    validation_policy_kl: f64,
-    validation_value_loss: f64,
-    evaluated: bool,
-    candidate_wins: usize,
-    baseline_wins: usize,
-    draws: usize,
-    pair_0: usize,
-    pair_0_5: usize,
-    pair_1: usize,
-    pair_1_5: usize,
-    pair_2: usize,
-    score: f64,
-    los: f64,
-    promoted: bool,
-    baseline_generation: usize,
-    champion_generation: usize,
-    checkpoint: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-struct PendingSelfPlay {
-    generation: usize,
-    training_samples: usize,
-    validation_samples: usize,
-    elapsed_seconds: f64,
-    evaluations: u64,
-    unique_games: usize,
-}
+use storage::{
+    GenerationMetrics, PendingSelfPlay, RUN_MARKER, RecoveredSelfPlay, RunState, acquire_run_lock,
+    append_metrics, atomic_network_save, atomic_optimizer_save, atomic_toml_save, checkpoint_path,
+    clean_output, discard_committed_self_play, optimizer_path, prepare_staging, recover_self_play,
+    validate_metrics, validate_run_state, verify_run_marker,
+};
 
 struct GenerationSelfPlay {
     training: Vec<SelfPlaySample>,
@@ -431,9 +376,14 @@ fn generate_or_recover_self_play(
     let pending_path = config.output.join("pending-self-play.toml");
     let training_path = replay_path(&config.output, generation);
     let validation_path = validation_replay_path(&config.output, generation);
-    if let Some((training, validation, pending)) =
+    if let Some(recovered) =
         recover_self_play(&pending_path, &training_path, &validation_path, generation)?
     {
+        let RecoveredSelfPlay {
+            training,
+            validation,
+            pending,
+        } = recovered;
         info!(
             positions = training.len() + validation.len(),
             "recovered persisted self-play"
@@ -571,210 +521,9 @@ fn evaluate_generation(
     .map(Some)
 }
 
-type RecoveredSelfPlay = (Vec<SelfPlaySample>, Vec<SelfPlaySample>, PendingSelfPlay);
-
-fn discard_committed_self_play(output: &Path, generation: usize) -> Result<(), Box<dyn Error>> {
-    let manifest_path = output.join("pending-self-play.toml");
-    if !manifest_path.exists() {
-        return Ok(());
-    }
-    let pending = toml::from_str::<PendingSelfPlay>(&fs::read_to_string(&manifest_path)?)?;
-    if pending.generation <= generation {
-        fs::remove_file(manifest_path)?;
-        let validation_path = validation_replay_path(output, pending.generation);
-        if validation_path.exists() {
-            fs::remove_file(validation_path)?;
-        }
-    }
-    Ok(())
-}
-
-fn recover_self_play(
-    manifest_path: &Path,
-    training_path: &Path,
-    validation_path: &Path,
-    generation: usize,
-) -> Result<Option<RecoveredSelfPlay>, Box<dyn Error>> {
-    if !manifest_path.exists() {
-        return Ok(None);
-    }
-    let pending = toml::from_str::<PendingSelfPlay>(&fs::read_to_string(manifest_path)?)?;
-    if pending.generation != generation {
-        return Err("pending self-play generation does not match run state".into());
-    }
-    if !training_path.exists() || !validation_path.exists() {
-        return Err("pending self-play manifest references missing replay data".into());
-    }
-    let training = read_replay(training_path)?;
-    let validation = read_replay(validation_path)?;
-    if pending.training_samples != training.len() || pending.validation_samples != validation.len()
-    {
-        return Err("pending self-play manifest does not match replay data".into());
-    }
-    Ok(Some((training, validation, pending)))
-}
-
-fn acquire_run_lock(output: &Path) -> io::Result<File> {
-    let path = suffixed_path(output, ".lock");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)?;
-    FileExt::try_lock_exclusive(&file).map_err(|error| {
-        if error.kind() == io::ErrorKind::WouldBlock {
-            io::Error::new(
-                error.kind(),
-                format!("experiment output is already locked: {}", output.display()),
-            )
-        } else {
-            error
-        }
-    })?;
-    Ok(file)
-}
-
-fn prepare_staging(output: &Path) -> io::Result<PathBuf> {
-    let staging = suffixed_path(output, ".initializing");
-    if staging.exists() {
-        fs::remove_dir_all(&staging)?;
-    }
-    fs::create_dir_all(staging.join("replay"))?;
-    Ok(staging)
-}
-
-fn suffixed_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
-fn clean_output(output: &Path) -> Result<(), Box<dyn Error>> {
-    if !output.exists() {
-        return Ok(());
-    }
-    if verify_run_marker(output).is_err() {
-        return Err(format!(
-            "refusing to clean unrecognized output directory: {}",
-            output.display()
-        )
-        .into());
-    }
-    fs::remove_dir_all(output)?;
-    Ok(())
-}
-
 fn rounded(value: f64, decimal_places: i32) -> f64 {
     let scale = 10_f64.powi(decimal_places);
     (value * scale).round() / scale
-}
-
-fn append_metrics(path: &Path, metrics: &GenerationMetrics) -> Result<(), Box<dyn Error>> {
-    let file = OpenOptions::new().append(true).open(path)?;
-    let write_header = file.metadata()?.len() == 0;
-    let mut writer = csv::WriterBuilder::new()
-        .has_headers(write_header)
-        .from_writer(file);
-    writer.serialize(metrics)?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn validate_metrics(path: &Path, generation: usize) -> Result<(), Box<dyn Error>> {
-    if fs::metadata(path)?.len() == 0 {
-        return if generation == 0 {
-            Ok(())
-        } else {
-            Err("metrics are empty for a committed run".into())
-        };
-    }
-
-    let mut reader = csv::Reader::from_path(path)?;
-    if reader.headers()?.clone() != metrics_headers()? {
-        return Err("metrics schema does not match the current Etive format".into());
-    }
-    let mut rows = 0;
-    for (index, row) in reader.deserialize::<GenerationMetrics>().enumerate() {
-        let row = row?;
-        if row.generation != index + 1 {
-            return Err("metrics generations are not contiguous".into());
-        }
-        rows += 1;
-    }
-    if rows != generation {
-        return Err("metrics do not contain exactly one row per committed generation".into());
-    }
-    Ok(())
-}
-
-fn metrics_headers() -> Result<csv::StringRecord, Box<dyn Error>> {
-    let mut writer = csv::Writer::from_writer(Vec::new());
-    writer.serialize(GenerationMetrics::default())?;
-    let bytes = writer.into_inner()?;
-    let mut reader = csv::Reader::from_reader(bytes.as_slice());
-    Ok(reader.headers()?.clone())
-}
-
-fn atomic_network_save(network: &OthelloNetwork, path: &Path) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    network.save(&temporary)?;
-    fs::rename(&temporary, path)?;
-    Ok(())
-}
-
-fn atomic_optimizer_save(trainer: &TrainingSession, path: &Path) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    trainer.save_optimizer(&temporary)?;
-    fs::rename(&temporary, path)?;
-    Ok(())
-}
-
-fn atomic_toml_save(path: &Path, value: &impl Serialize) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    fs::write(&temporary, toml::to_string(value)?)?;
-    fs::rename(temporary, path)?;
-    Ok(())
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
-}
-
-fn verify_run_marker(output: &Path) -> io::Result<()> {
-    if fs::read_to_string(output.join(".etive-run"))? != RUN_MARKER {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid Etive run marker",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_run_state(state: RunState) -> io::Result<()> {
-    if state.champion_generation > state.generation
-        || !state.elapsed_seconds.is_finite()
-        || state.elapsed_seconds < 0.0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid run state",
-        ));
-    }
-    Ok(())
-}
-
-fn checkpoint_path(output: &Path, generation: usize) -> PathBuf {
-    output.join(format!("generation-{generation:04}.burnpack"))
-}
-
-fn optimizer_path(output: &Path, generation: usize) -> PathBuf {
-    output.join(format!("generation-{generation:04}-optimizer.burnpack"))
 }
 
 #[cfg(test)]
@@ -782,41 +531,6 @@ mod tests {
     use super::*;
     use crate::game::{Game, Outcome};
     use crate::othello::Board;
-
-    #[test]
-    fn run_state_requires_current_explicit_fields() {
-        let state: RunState =
-            toml::from_str("generation = 4\nchampion_generation = 2\nelapsed_seconds = 300.0\n")
-                .unwrap();
-        assert!(validate_run_state(state).is_ok());
-
-        assert!(toml::from_str::<RunState>("generation = 4\nelapsed_seconds = 300.0\n").is_err());
-        assert!(
-            toml::from_str::<RunState>(
-                "generation = 4\nchampion_generation = 2\nnetwork_generation = 4\nelapsed_seconds = 300.0\n"
-            )
-            .is_err()
-        );
-
-        let future: RunState =
-            toml::from_str("generation = 4\nchampion_generation = 5\nelapsed_seconds = 300.0\n")
-                .unwrap();
-        assert!(validate_run_state(future).is_err());
-        assert!(
-            validate_run_state(RunState {
-                elapsed_seconds: f64::NAN,
-                ..state
-            })
-            .is_err()
-        );
-        assert!(
-            validate_run_state(RunState {
-                elapsed_seconds: -1.0,
-                ..state
-            })
-            .is_err()
-        );
-    }
 
     #[test]
     fn validation_split_mixes_trajectory_hashes() {
@@ -844,145 +558,5 @@ mod tests {
 
         assert_eq!(training.len(), 1);
         assert!(validation.is_empty());
-    }
-
-    #[test]
-    fn metrics_are_typed_and_match_committed_generations() {
-        let path = std::env::temp_dir().join(format!("etive-metrics-{}.csv", std::process::id()));
-        if path.exists() {
-            fs::remove_file(&path).unwrap();
-        }
-        File::create(&path).unwrap();
-        append_metrics(
-            &path,
-            &GenerationMetrics {
-                generation: 1,
-                checkpoint: "generation-0001.burnpack".into(),
-                ..GenerationMetrics::default()
-            },
-        )
-        .unwrap();
-
-        validate_metrics(&path, 1).unwrap();
-        assert!(validate_metrics(&path, 0).is_err());
-        let header = fs::read_to_string(&path).unwrap();
-        assert!(header.starts_with("generation,samples,training_samples"));
-        assert!(header.contains("candidate_wins,baseline_wins"));
-
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn clean_only_removes_recognized_runs() {
-        let output = std::env::temp_dir().join(format!("etive-clean-{}", std::process::id()));
-        if output.exists() {
-            fs::remove_dir_all(&output).unwrap();
-        }
-        fs::create_dir(&output).unwrap();
-
-        assert!(clean_output(&output).is_err());
-        assert!(output.exists());
-
-        fs::write(output.join(".etive-run"), RUN_MARKER).unwrap();
-        fs::write(
-            output.join("state.toml"),
-            "generation = 0\nchampion_generation = 0\nelapsed_seconds = 0.0\n",
-        )
-        .unwrap();
-        clean_output(&output).unwrap();
-        assert!(!output.exists());
-    }
-
-    #[test]
-    fn run_lock_rejects_a_second_owner() {
-        let output = std::env::temp_dir().join(format!("etive-lock-{}", std::process::id()));
-        let lock_path = suffixed_path(&output, ".lock");
-        if lock_path.exists() {
-            fs::remove_file(&lock_path).unwrap();
-        }
-
-        let first = acquire_run_lock(&output).unwrap();
-        let error = match acquire_run_lock(&output) {
-            Ok(_) => panic!("second run unexpectedly acquired the output lock"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("already locked"));
-
-        drop(first);
-        drop(acquire_run_lock(&output).unwrap());
-        fs::remove_file(lock_path).unwrap();
-    }
-
-    #[test]
-    fn staging_replaces_interrupted_initialization() {
-        let output = std::env::temp_dir().join(format!("etive-staging-{}", std::process::id()));
-        let staging = suffixed_path(&output, ".initializing");
-        if output.exists() {
-            fs::remove_dir_all(&output).unwrap();
-        }
-        if staging.exists() {
-            fs::remove_dir_all(&staging).unwrap();
-        }
-        fs::create_dir(&staging).unwrap();
-        fs::write(staging.join("partial"), []).unwrap();
-
-        let staging = prepare_staging(&output).unwrap();
-        assert!(!staging.join("partial").exists());
-        assert!(!output.exists());
-        assert!(staging.join("replay").is_dir());
-
-        fs::remove_dir_all(staging).unwrap();
-    }
-
-    #[test]
-    fn recovery_requires_a_matching_committed_manifest() {
-        let output = std::env::temp_dir().join(format!("etive-recovery-{}", std::process::id()));
-        if output.exists() {
-            fs::remove_dir_all(&output).unwrap();
-        }
-        let replay = output.join("replay");
-        fs::create_dir_all(&replay).unwrap();
-        let manifest_path = output.join("pending-self-play.toml");
-        let training_path = replay_path(&output, 1);
-        let validation_path = validation_replay_path(&output, 1);
-        let mut policy = [0.0; Board::ACTION_COUNT];
-        policy[19] = 1.0;
-        let sample = SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Draw,
-            game: 1,
-        };
-        atomic_replay_save(std::slice::from_ref(&sample), &training_path).unwrap();
-
-        assert!(
-            recover_self_play(&manifest_path, &training_path, &validation_path, 1)
-                .unwrap()
-                .is_none()
-        );
-
-        atomic_replay_save(&[], &validation_path).unwrap();
-        atomic_toml_save(
-            &manifest_path,
-            &PendingSelfPlay {
-                generation: 1,
-                training_samples: 1,
-                validation_samples: 0,
-                elapsed_seconds: 1.0,
-                evaluations: 2,
-                unique_games: 1,
-            },
-        )
-        .unwrap();
-        let recovered =
-            recover_self_play(&manifest_path, &training_path, &validation_path, 1).unwrap();
-        assert_eq!(recovered.unwrap().0.len(), 1);
-
-        discard_committed_self_play(&output, 1).unwrap();
-        assert!(!manifest_path.exists());
-        assert!(!validation_path.exists());
-        assert!(training_path.exists());
-
-        fs::remove_dir_all(output).unwrap();
     }
 }

@@ -152,11 +152,6 @@ impl Board {
         BitBoard(movegen::legal_placements(self.player, self.opponent))
     }
 
-    #[inline(always)]
-    pub fn has_legal_placement(self) -> bool {
-        movegen::legal_placements(self.player, self.opponent) != 0
-    }
-
     /// Returns the discs that placing at `square` would flip.
     ///
     /// Occupied squares and placements that capture no discs return an empty
@@ -175,11 +170,13 @@ impl Board {
 
     #[inline(always)]
     pub fn is_pass_legal(self) -> bool {
-        !self.has_legal_placement() && movegen::legal_placements(self.opponent, self.player) != 0
+        self.legal_placements().is_empty()
+            && movegen::legal_placements(self.opponent, self.player) != 0
     }
 
     pub fn status(self) -> GameStatus {
-        if self.has_legal_placement() || movegen::legal_placements(self.opponent, self.player) != 0
+        if !self.legal_placements().is_empty()
+            || movegen::legal_placements(self.opponent, self.player) != 0
         {
             return GameStatus::Ongoing;
         }
@@ -213,13 +210,6 @@ impl Board {
             .expect("attempted to play an illegal move");
     }
 
-    /// Passes without checking that a pass is currently legal.
-    #[inline(always)]
-    pub fn pass_unchecked(&mut self) {
-        debug_assert!(self.is_pass_legal(), "attempted to play an illegal pass");
-        self.swap_players();
-    }
-
     #[inline(always)]
     fn swap_players(&mut self) {
         std::mem::swap(&mut self.player, &mut self.opponent);
@@ -242,9 +232,11 @@ impl Game for Board {
     }
 
     fn legal_actions(&self) -> impl ExactSizeIterator<Item = Self::Action> + '_ {
+        let placements = self.legal_placements();
         LegalActions {
-            placements: self.legal_placements().into_iter(),
-            pass: self.is_pass_legal(),
+            placements: placements.into_iter(),
+            pass: placements.is_empty()
+                && movegen::legal_placements(self.opponent, self.player) != 0,
         }
     }
 

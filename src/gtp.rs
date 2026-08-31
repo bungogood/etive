@@ -224,11 +224,11 @@ impl Session {
 
         let mv = match &mut self.search {
             Some(search) => search.best_move(self.board)?,
-            None => match self.board.legal_placements().into_iter().next() {
-                Some(square) => Move::Place(square),
-                None if self.board.is_pass_legal() => Move::Pass,
-                None => return Ok("pass".to_owned()),
-            },
+            None => self
+                .board
+                .legal_actions()
+                .next()
+                .expect("ongoing position must have a legal action"),
         };
         if play_move {
             self.apply_move(mv)?;

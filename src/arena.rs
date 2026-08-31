@@ -168,16 +168,13 @@ where
 }
 
 fn score_terminal<G: Game>(result: &mut EvalResult, game: G, baseline_color: Color) -> Option<u8> {
-    let outcome = game.outcome()?;
-    if outcome == Outcome::Draw {
-        result.draws += 1;
-        return Some(1);
-    }
-
-    let winner = match outcome {
+    let winner = match game.outcome()? {
         Outcome::Win => game.side_to_move(),
         Outcome::Loss => !game.side_to_move(),
-        Outcome::Draw => unreachable!(),
+        Outcome::Draw => {
+            result.draws += 1;
+            return Some(1);
+        }
     };
     if winner == baseline_color {
         result.baseline_wins += 1;

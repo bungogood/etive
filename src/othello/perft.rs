@@ -12,7 +12,7 @@ pub fn perft(board: &Board, depth: u8) -> u64 {
             return 1;
         }
         let mut child = *board;
-        child.pass_unchecked();
+        child.play_unchecked(Move::Pass);
         return perft(&child, depth - 1);
     }
     if depth == 1 {

@@ -6,6 +6,7 @@ mod board;
 mod diagnostics;
 pub mod evaluation;
 pub mod experiment;
+mod frozen_training;
 mod movegen;
 mod perft;
 mod replay;
@@ -16,9 +17,8 @@ pub use bitboard::{BitBoard, BitBoardIter};
 pub use board::{
     Board, BoardError, Color, GameStatus, LegalActions, Move, ParseBoardError, ParseMoveError,
 };
-pub use diagnostics::{
-    DiagnosticsReport, FrozenTrainingConfig, FrozenTrainingReport, diagnose_replay, train_frozen,
-};
+pub use diagnostics::{DiagnosticsReport, diagnose_replay};
+pub use frozen_training::{FrozenTrainingConfig, FrozenTrainingReport, train_frozen};
 pub use perft::perft;
 pub use square::{ParseSquareError, Square};
 

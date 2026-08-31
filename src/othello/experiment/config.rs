@@ -16,36 +16,9 @@ pub(super) struct Config {
     pub(super) seed: u64,
     pub(super) checkpoint: Option<PathBuf>,
     pub(super) model: OthelloModelConfig,
-    pub(super) self_play: SelfPlay,
+    pub(super) self_play: self_play::Config,
     pub(super) train: Train,
     pub(super) eval: Eval,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct SelfPlay {
-    pub(super) games: usize,
-    pub(super) simulations: u32,
-    pub(super) workers: usize,
-    pub(super) inference_batch_size: usize,
-    pub(super) dirichlet_alpha: f64,
-    pub(super) dirichlet_fraction: f32,
-    pub(super) temperature_moves: usize,
-}
-
-impl SelfPlay {
-    pub(super) fn config(self, seed: u64) -> self_play::Config {
-        self_play::Config {
-            games: self.games,
-            simulations: self.simulations,
-            workers: self.workers,
-            inference_batch_size: self.inference_batch_size,
-            seed,
-            dirichlet_alpha: self.dirichlet_alpha,
-            dirichlet_fraction: self.dirichlet_fraction,
-            temperature_moves: self.temperature_moves,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -74,6 +47,7 @@ pub(super) struct Eval {
 pub struct SelfPlayBenchmarkConfig {
     pub model: OthelloModelConfig,
     pub checkpoint: Option<PathBuf>,
+    pub seed: u64,
     pub self_play: self_play::Config,
 }
 
@@ -87,14 +61,15 @@ pub fn load_self_play_benchmark_config(
     Ok(SelfPlayBenchmarkConfig {
         model: config.model,
         checkpoint: config.checkpoint,
-        self_play: config.self_play.config(config.seed),
+        seed: config.seed,
+        self_play: config.self_play,
     })
 }
 
 pub(super) fn validate(config: &Config) -> Result<(), Box<dyn Error>> {
     if !config.hours.is_finite()
         || config.hours <= 0.0
-        || !config.self_play.config(config.seed).is_valid()
+        || !config.self_play.is_valid()
         || config.train.batch_size == 0
         || config.train.replay_positions == 0
         || config.train.replay_reuse == 0

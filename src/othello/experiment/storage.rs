@@ -60,6 +60,7 @@ pub(super) struct GenerationMetrics {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PendingSelfPlay {
     pub(super) generation: usize,
     pub(super) training_samples: usize,
@@ -69,10 +70,11 @@ pub(super) struct PendingSelfPlay {
     pub(super) unique_games: usize,
 }
 
-pub(super) struct RecoveredSelfPlay {
+pub(super) struct GenerationSelfPlay {
     pub(super) training: Vec<SelfPlaySample>,
     pub(super) validation: Vec<SelfPlaySample>,
     pub(super) pending: PendingSelfPlay,
+    pub(super) recovered: bool,
 }
 
 pub(super) struct RunLock {
@@ -103,7 +105,7 @@ pub(super) fn recover_self_play(
     training_path: &Path,
     validation_path: &Path,
     generation: usize,
-) -> Result<Option<RecoveredSelfPlay>, Box<dyn Error>> {
+) -> Result<Option<GenerationSelfPlay>, Box<dyn Error>> {
     if !manifest_path.exists() {
         return Ok(None);
     }
@@ -120,10 +122,11 @@ pub(super) fn recover_self_play(
     {
         return Err("pending self-play manifest does not match replay data".into());
     }
-    Ok(Some(RecoveredSelfPlay {
+    Ok(Some(GenerationSelfPlay {
         training,
         validation,
         pending,
+        recovered: true,
     }))
 }
 

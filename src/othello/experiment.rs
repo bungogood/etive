@@ -27,18 +27,11 @@ pub use config::{SelfPlayBenchmarkConfig, load_self_play_benchmark_config};
 
 use config::{Config, resolve_paths, validate};
 use storage::{
-    GenerationMetrics, PendingSelfPlay, RUN_MARKER, RecoveredSelfPlay, RunState, acquire_run_lock,
+    GenerationMetrics, GenerationSelfPlay, PendingSelfPlay, RUN_MARKER, RunState, acquire_run_lock,
     append_metrics, atomic_network_save, atomic_optimizer_save, atomic_toml_save, checkpoint_path,
     clean_output, discard_committed_self_play, optimizer_path, prepare_staging, recover_self_play,
     validate_metrics, validate_run_state, verify_run_marker,
 };
-
-struct GenerationSelfPlay {
-    training: Vec<SelfPlaySample>,
-    validation: Vec<SelfPlaySample>,
-    pending: PendingSelfPlay,
-    recovered: bool,
-}
 
 pub fn run(
     config_path: impl AsRef<Path>,
@@ -373,30 +366,19 @@ fn generate_or_recover_self_play(
     if let Some(recovered) =
         recover_self_play(&pending_path, &training_path, &validation_path, generation)?
     {
-        let RecoveredSelfPlay {
-            training,
-            validation,
-            pending,
-        } = recovered;
         info!(
-            positions = training.len() + validation.len(),
+            positions = recovered.training.len() + recovered.validation.len(),
             "recovered persisted self-play"
         );
-        return Ok(GenerationSelfPlay {
-            training,
-            validation,
-            pending,
-            recovered: true,
-        });
+        return Ok(recovered);
     }
 
     info!("starting self-play");
     let start = Instant::now();
     let self_play = self_play::run::<Board, _>(
         OthelloBurnEvaluator::from_network(device.clone(), network),
-        config
-            .self_play
-            .config(config.seed.wrapping_add(generation as u64)),
+        config.self_play,
+        config.seed.wrapping_add(generation as u64),
     )?;
     let (training, validation) =
         split_training_validation(self_play.samples, config.train.validation_game_modulus);

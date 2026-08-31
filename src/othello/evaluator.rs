@@ -241,11 +241,11 @@ mod tests {
                 simulations: 2,
                 workers: 1,
                 inference_batch_size: 8,
-                seed: 11,
                 dirichlet_alpha: 0.3,
                 dirichlet_fraction: 0.25,
                 temperature_moves: 20,
             },
+            11,
         )
         .unwrap();
 

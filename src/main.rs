@@ -274,7 +274,7 @@ fn benchmark_self_play(
     let config = experiment::load_self_play_benchmark_config(config_path)?;
     let network = match config.checkpoint {
         Some(path) => OthelloNetwork::load_with_config(&path, device, config.model)?,
-        None => OthelloNetwork::new_with_config(device, config.self_play.seed, config.model),
+        None => OthelloNetwork::new_with_config(device, config.seed, config.model),
     };
     println!(
         "model: channels={} residual_blocks={} norm_groups={}",
@@ -291,6 +291,7 @@ fn benchmark_self_play(
     let result = self_play::run::<Board, _>(
         OthelloBurnEvaluator::from_network(device.clone(), &network),
         config.self_play,
+        config.seed,
     )?;
     let elapsed = start.elapsed();
     let seconds = elapsed.as_secs_f64();

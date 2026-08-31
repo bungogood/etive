@@ -9,19 +9,20 @@ use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma};
+use serde::Deserialize;
 use tracing::{Span, info};
 
 use crate::evaluator::{InferenceBatch, PipelinedEvaluator};
 use crate::game::{Color, Game, Outcome};
 use crate::mcts::{EvaluationRequest, Mcts, MctsError, Selection};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub games: usize,
     pub simulations: u32,
     pub workers: usize,
     pub inference_batch_size: usize,
-    pub seed: u64,
     pub dirichlet_alpha: f64,
     pub dirichlet_fraction: f32,
     pub temperature_moves: usize,
@@ -114,18 +115,7 @@ struct InferenceRun {
     batches: u64,
 }
 
-struct WorkerConfig {
-    worker: usize,
-    game_count: usize,
-    inference_share: usize,
-    simulations: u32,
-    seed: u64,
-    dirichlet_alpha: f64,
-    dirichlet_fraction: f32,
-    temperature_moves: usize,
-}
-
-pub fn run<G, E>(evaluator: E, config: Config) -> Result<Run<G>, Error<E::Error>>
+pub fn run<G, E>(evaluator: E, config: Config, seed: u64) -> Result<Run<G>, Error<E::Error>>
 where
     G: Game + Default,
     E: PipelinedEvaluator<G> + Send + 'static,
@@ -142,8 +132,10 @@ where
         sync_channel(config.inference_batch_size.saturating_mul(2));
     let mut response_senders = Vec::with_capacity(worker_count);
     let mut response_receivers = Vec::with_capacity(worker_count);
-    for worker in 0..worker_count {
-        let game_count = shard_len(config.games, worker_count, worker);
+    let game_counts = (0..worker_count)
+        .map(|worker| shard_len(config.games, worker_count, worker))
+        .collect::<Vec<_>>();
+    for &game_count in &game_counts {
         let (sender, receiver) = sync_channel(game_count.max(1));
         response_senders.push(sender);
         response_receivers.push(receiver);
@@ -163,24 +155,21 @@ where
     });
 
     let mut workers = Vec::with_capacity(worker_count);
-    for (worker, responses) in response_receivers.into_iter().enumerate() {
-        let game_count = shard_len(config.games, worker_count, worker);
+    let inference_share = config
+        .inference_batch_size
+        .saturating_mul(2)
+        .div_ceil(worker_count);
+    for (worker, (responses, game_count)) in
+        response_receivers.into_iter().zip(game_counts).enumerate()
+    {
         let requests = request_sender.clone();
         workers.push(thread::spawn(move || {
             run_worker(
-                WorkerConfig {
-                    worker,
-                    game_count,
-                    inference_share: config
-                        .inference_batch_size
-                        .saturating_mul(2)
-                        .div_ceil(worker_count),
-                    simulations: config.simulations,
-                    seed: config.seed.wrapping_add(worker as u64),
-                    dirichlet_alpha: config.dirichlet_alpha,
-                    dirichlet_fraction: config.dirichlet_fraction,
-                    temperature_moves: config.temperature_moves,
-                },
+                worker,
+                game_count,
+                inference_share,
+                config,
+                seed.wrapping_add(worker as u64),
                 requests,
                 responses,
             )
@@ -404,7 +393,11 @@ fn push_inference_request<G: Game>(
 }
 
 fn run_worker<G, E>(
-    config: WorkerConfig,
+    worker: usize,
+    game_count: usize,
+    inference_share: usize,
+    config: Config,
+    seed: u64,
     requests: SyncSender<InferenceRequest<G>>,
     responses: Receiver<InferenceResponse<G>>,
 ) -> Result<Vec<Sample<G>>, Error<E>>
@@ -412,9 +405,9 @@ where
     G: Game + Default,
     E: StdError + 'static,
 {
-    let mut random = StdRng::seed_from_u64(config.seed);
+    let mut random = StdRng::seed_from_u64(seed);
     let dirichlet = Gamma::new(config.dirichlet_alpha, 1.0).expect("validated Dirichlet alpha");
-    let mut games = (0..config.game_count)
+    let mut games = (0..game_count)
         .map(|_| ActorGame {
             tree: Mcts::new(G::default()),
             simulations: 0,
@@ -439,7 +432,7 @@ where
             .iter()
             .filter(|game| game.tree.root_position().outcome().is_none())
             .count();
-        let max_pending_per_game = config.inference_share.div_ceil(active_games.max(1));
+        let max_pending_per_game = inference_share.div_ceil(active_games.max(1));
 
         for (tree_index, game) in games.iter_mut().enumerate() {
             if game.tree.root_position().outcome().is_some() {
@@ -489,7 +482,7 @@ where
                     Selection::Evaluate { request, position } => {
                         requests
                             .send(InferenceRequest {
-                                worker: config.worker,
+                                worker,
                                 tree: tree_index,
                                 request,
                                 position: *position,

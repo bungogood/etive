@@ -40,7 +40,12 @@ impl Config {
     }
 }
 
-#[derive(Clone)]
+#[derive(bincode::Decode, bincode::Encode, Clone)]
+#[bincode(
+    encode_bounds = "G: bincode::Encode, G::Policy: bincode::Encode",
+    decode_bounds = "G: bincode::Decode<__Context>, G::Policy: bincode::Decode<__Context>",
+    borrow_decode_bounds = "G: bincode::BorrowDecode<'__de, __Context>, G::Policy: bincode::BorrowDecode<'__de, __Context>"
+)]
 pub struct Sample<G: Game> {
     pub position: G,
     pub policy: G::Policy,
@@ -57,7 +62,7 @@ pub struct Run<G: Game> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E: StdError + 'static> {
-    #[error("actor configuration must be positive")]
+    #[error("self-play configuration is invalid")]
     InvalidConfig,
     #[error("evaluator failed: {0}")]
     Evaluator(#[source] E),
@@ -65,7 +70,7 @@ pub enum Error<E: StdError + 'static> {
     Mcts(#[from] MctsError),
     #[error("inference thread stopped")]
     InferenceStopped,
-    #[error("actor thread panicked")]
+    #[error("self-play worker panicked")]
     WorkerPanicked,
 }
 

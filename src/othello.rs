@@ -1,6 +1,5 @@
 //! Othello rules, move generation, and correctness tooling.
 
-pub mod actors;
 mod bitboard;
 mod board;
 mod diagnostics;

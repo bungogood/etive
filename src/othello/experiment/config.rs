@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::self_play;
+
 use super::super::OthelloModelConfig;
-use super::super::actors::ActorConfig;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,8 +34,8 @@ pub(super) struct SelfPlay {
 }
 
 impl SelfPlay {
-    pub(super) fn actor_config(self, seed: u64) -> ActorConfig {
-        ActorConfig {
+    pub(super) fn config(self, seed: u64) -> self_play::Config {
+        self_play::Config {
             games: self.games,
             simulations: self.simulations,
             workers: self.workers,
@@ -73,7 +74,7 @@ pub(super) struct Eval {
 pub struct SelfPlayBenchmarkConfig {
     pub model: OthelloModelConfig,
     pub checkpoint: Option<PathBuf>,
-    pub actor: ActorConfig,
+    pub self_play: self_play::Config,
 }
 
 pub fn load_self_play_benchmark_config(
@@ -86,14 +87,14 @@ pub fn load_self_play_benchmark_config(
     Ok(SelfPlayBenchmarkConfig {
         model: config.model,
         checkpoint: config.checkpoint,
-        actor: config.self_play.actor_config(config.seed),
+        self_play: config.self_play.config(config.seed),
     })
 }
 
 pub(super) fn validate(config: &Config) -> Result<(), Box<dyn Error>> {
     if !config.hours.is_finite()
         || config.hours <= 0.0
-        || !config.self_play.actor_config(config.seed).is_valid()
+        || !config.self_play.config(config.seed).is_valid()
         || config.train.batch_size == 0
         || config.train.replay_positions == 0
         || config.train.replay_reuse == 0

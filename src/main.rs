@@ -4,13 +4,13 @@ use std::time::Instant;
 use burn::tensor::Device;
 use clap::{Parser, Subcommand};
 use etive::metrics::write_csv;
-use etive::othello::actors::run as run_actors;
 use etive::othello::evaluation::{EvalConfig, evaluate};
 use etive::othello::experiment;
 use etive::othello::{
     Board, FrozenTrainingConfig, OthelloBurnEvaluator, OthelloNetwork, diagnose_replay, perft,
     train_frozen,
 };
+use etive::self_play;
 use tracing_subscriber::EnvFilter;
 
 mod gtp;
@@ -68,7 +68,7 @@ enum Command {
     },
     /// Measure the production self-play pipeline.
     Bench {
-        /// Experiment TOML supplying model and actor settings.
+        /// Experiment TOML supplying model and self-play settings.
         config: PathBuf,
     },
     /// Compare a checkpoint's predictions with validated replay targets.
@@ -274,7 +274,7 @@ fn benchmark_self_play(
     let config = experiment::load_self_play_benchmark_config(config_path)?;
     let network = match config.checkpoint {
         Some(path) => OthelloNetwork::load_with_config(&path, device, config.model)?,
-        None => OthelloNetwork::new_with_config(device, config.actor.seed, config.model),
+        None => OthelloNetwork::new_with_config(device, config.self_play.seed, config.model),
     };
     println!(
         "model: channels={} residual_blocks={} norm_groups={}",
@@ -282,21 +282,21 @@ fn benchmark_self_play(
     );
     println!(
         "self-play: games={} workers={} max_batch={} simulations={}",
-        config.actor.games,
-        config.actor.workers,
-        config.actor.inference_batch_size,
-        config.actor.simulations,
+        config.self_play.games,
+        config.self_play.workers,
+        config.self_play.inference_batch_size,
+        config.self_play.simulations,
     );
     let start = Instant::now();
-    let result = run_actors(
+    let result = self_play::run::<Board, _>(
         OthelloBurnEvaluator::from_network(device.clone(), &network),
-        config.actor,
+        config.self_play,
     )?;
     let elapsed = start.elapsed();
     let seconds = elapsed.as_secs_f64();
     println!(
         "self-play: elapsed={elapsed:.3?} games/s={:.2} evaluations/s={:.0} evaluations={} inference_batches={} average_batch={:.2} positions={} unique_games={}",
-        config.actor.games as f64 / seconds,
+        config.self_play.games as f64 / seconds,
         result.evaluations as f64 / seconds,
         result.evaluations,
         result.inference_batches,

@@ -7,13 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::game::{Game, Outcome};
 use crate::othello::Board;
 
-#[derive(bincode::Decode, bincode::Encode, Clone, Debug)]
-pub struct SelfPlaySample {
-    pub position: Board,
-    pub policy: [f32; Board::ACTION_COUNT],
-    pub outcome: Outcome,
-    pub game: u64,
-}
+pub type SelfPlaySample = crate::self_play::Sample<Board>;
 
 const FORMAT_VERSION: u8 = 2;
 

@@ -196,6 +196,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     use super::super::OthelloModelConfig;
     use super::*;
+    use crate::game::Game;
+    use crate::self_play;
 
     #[cfg(feature = "cuda")]
     #[test]
@@ -228,6 +230,37 @@ mod tests {
                 .into_iter()
                 .all(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
         );
+    }
+
+    #[test]
+    fn supports_parallel_self_play() {
+        let result = self_play::run::<Board, _>(
+            OthelloBurnEvaluator::new(Device::flex(), 7),
+            self_play::Config {
+                games: 2,
+                simulations: 2,
+                workers: 1,
+                inference_batch_size: 8,
+                seed: 11,
+                dirichlet_alpha: 0.3,
+                dirichlet_fraction: 0.25,
+                temperature_moves: 20,
+            },
+        )
+        .unwrap();
+
+        assert!(result.evaluations > 0);
+        assert!(result.unique_games > 1);
+        assert!(!result.samples.is_empty());
+        for sample in result.samples {
+            assert!((sample.policy.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            for (index, probability) in sample.policy.into_iter().enumerate() {
+                if probability > 0.0 {
+                    let action = Board::action_from_index(index).unwrap();
+                    assert!(sample.position.is_legal(action));
+                }
+            }
+        }
     }
 
     #[cfg(feature = "cuda")]

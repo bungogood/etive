@@ -10,16 +10,15 @@ use burn::tensor::Device;
 use tracing::{info, info_span, warn};
 
 use crate::metrics::PolicyValueMetrics;
+use crate::self_play;
 
-use super::OthelloBurnEvaluator;
-use super::OthelloNetwork;
-use super::actors::run as run_actors;
 use super::evaluation::{EvalConfig, EvalResult, evaluate};
 use super::replay::{
     SelfPlaySample, atomic_replay_save, load_replay, replay_path, trim_replay,
     validation_replay_path,
 };
 use super::training::{TrainingSession, evaluate_loss};
+use super::{Board, OthelloBurnEvaluator, OthelloNetwork};
 
 mod config;
 mod storage;
@@ -393,11 +392,11 @@ fn generate_or_recover_self_play(
 
     info!("starting self-play");
     let start = Instant::now();
-    let self_play = run_actors(
+    let self_play = self_play::run::<Board, _>(
         OthelloBurnEvaluator::from_network(device.clone(), network),
         config
             .self_play
-            .actor_config(config.seed.wrapping_add(generation as u64)),
+            .config(config.seed.wrapping_add(generation as u64)),
     )?;
     let (training, validation) =
         split_training_validation(self_play.samples, config.train.validation_game_modulus);

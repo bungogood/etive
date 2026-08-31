@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::game::{Game, Outcome};
-use crate::othello::Board;
+use crate::othello::{Board, Move};
 
 use super::temporary::atomic_file_save;
 
@@ -102,8 +102,7 @@ fn validate(sample: &SelfPlaySample) -> Result<(), Box<dyn Error>> {
             return Err(invalid("policy must contain finite probabilities"));
         }
         if probability > 0.0 {
-            let action =
-                Board::action_from_index(index).ok_or_else(|| invalid("invalid action"))?;
+            let action = Move::from_index(index).ok_or_else(|| invalid("invalid action"))?;
             if !sample.position.is_legal(action) {
                 return Err(invalid("policy assigns probability to an illegal action"));
             }
@@ -135,7 +134,6 @@ pub(super) fn validation_replay_path(output: &Path, generation: usize) -> PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::othello::Move;
 
     fn sample(game: u64) -> SelfPlaySample {
         let mut policy = [0.0; 65];
@@ -162,7 +160,8 @@ mod tests {
 
     #[test]
     fn replay_round_trips_and_rejects_trailing_data() {
-        let path = std::env::temp_dir().join(format!("etive-replay-{}.bin", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replay.bin");
         atomic_replay_save(&[sample(42)], &path).unwrap();
         assert_eq!(read_replay(&path).unwrap()[0].game, 42);
 
@@ -170,12 +169,12 @@ mod tests {
         bytes.push(0);
         fs::write(&path, bytes).unwrap();
         assert!(read_replay(&path).is_err());
-        fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn rejects_invalid_policies() {
-        let path = std::env::temp_dir().join(format!("etive-invalid-{}.bin", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("invalid.bin");
         for (index, value) in [(19, f32::NAN), (19, -1.0), (0, 1.0)] {
             let mut sample = sample(1);
             sample.policy[19] = 0.0;
@@ -186,10 +185,8 @@ mod tests {
 
     #[test]
     fn rejects_inconsistent_value_perspectives_within_a_game() {
-        let path = std::env::temp_dir().join(format!(
-            "etive-inconsistent-outcome-{}.bin",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("inconsistent-outcome.bin");
         let black_position = Board::default();
         let mut white_position = black_position;
         white_position.play(Move::Place("d3".parse().unwrap()));
@@ -205,7 +202,6 @@ mod tests {
             sample_for(white_position, Outcome::Win, 42),
         ];
         assert!(atomic_replay_save(&inconsistent, &path).is_err());
-        fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -167,13 +167,12 @@ mod tests {
 
     #[test]
     fn validates_arguments_and_empty_replay() {
-        let base =
-            std::env::temp_dir().join(format!("etive-frozen-validation-{}", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
         let config = frozen_config(base.join("output"));
         assert!(validate_frozen_training(&[], &config).is_err());
 
         let replay = base.join("empty.bin");
-        fs::create_dir_all(&base).unwrap();
         let bytes = bincode::encode_to_vec(
             (2u8, Vec::<SelfPlaySample>::new()),
             bincode::config::standard(),
@@ -189,16 +188,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("contains no rows"));
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn output_refuses_collisions_and_resolves_architecture_metadata() {
-        let base = std::env::temp_dir().join(format!("etive-frozen-output-{}", std::process::id()));
-        if base.exists() {
-            fs::remove_dir_all(&base).unwrap();
-        }
-        fs::create_dir_all(&base).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
         fs::write(
             base.join("model.toml"),
             toml::to_string(&OthelloModelConfig::WEEKEND).unwrap(),
@@ -212,8 +207,7 @@ mod tests {
             resolve_checkpoint_config(&base.join("nested/missing.burnpack")),
             OthelloModelConfig::LEGACY
         );
-        assert!(prepare_frozen_output(&base).is_err());
-        fs::remove_dir_all(base).unwrap();
+        assert!(prepare_frozen_output(base).is_err());
     }
 
     #[test]

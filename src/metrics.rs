@@ -22,27 +22,8 @@ impl<T: Copy + Sub<Output = T>> PolicyValueMetrics<T> {
         }
     }
 
-    pub fn map<U: Copy + Sub<Output = U>>(
-        self,
-        mut map: impl FnMut(T) -> U,
-    ) -> PolicyValueMetrics<U> {
-        PolicyValueMetrics::new(
-            map(self.policy_cross_entropy),
-            map(self.policy_target_entropy),
-            map(self.value_mse),
-        )
-    }
-}
-
-impl<T: Copy + Sub<Output = T>> PolicyValueMetrics<T> {
     pub fn policy_kl(self) -> T {
         self.policy_cross_entropy - self.policy_target_entropy
-    }
-}
-
-impl From<PolicyValueMetrics<f32>> for PolicyValueMetrics<f64> {
-    fn from(metrics: PolicyValueMetrics<f32>) -> Self {
-        metrics.map(f64::from)
     }
 }
 
@@ -59,11 +40,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_kl_and_maps_precision() {
+    fn derives_policy_kl() {
         let metrics = PolicyValueMetrics::new(2.0_f32, 1.25, 0.5);
 
         assert_eq!(metrics.policy_kl(), 0.75);
-        assert_eq!(PolicyValueMetrics::<f64>::from(metrics).policy_kl(), 0.75);
-        assert_eq!(metrics.map(|value| value * 2.0).value_mse, 1.0);
     }
 }

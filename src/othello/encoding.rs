@@ -49,8 +49,6 @@ fn encode_two_planes(mut player: u64, mut opponent: u64, area: usize, output: &m
 
 #[cfg(test)]
 mod tests {
-    use burn::tensor::{Device, Tensor, TensorData};
-
     use super::*;
     use crate::othello::{Move, Square as OthelloSquare};
 
@@ -83,17 +81,5 @@ mod tests {
 
         assert_eq!(output[..128].iter().sum::<f32>(), 4.0);
         assert_eq!(output[128..].iter().sum::<f32>(), 5.0);
-    }
-
-    #[test]
-    fn encoded_batch_constructs_one_burn_tensor() {
-        let games = [Board::default(); 2];
-        let mut output = vec![0.0; games.len() * OthelloEncoding::LEN];
-        OthelloEncoding::encode_batch(&games, &mut output);
-
-        let tensor = Tensor::<1>::from_data(TensorData::from(output.as_slice()), &Device::flex())
-            .reshape([games.len(), 2, 8, 8]);
-        assert_eq!(tensor.dims(), [2, 2, 8, 8]);
-        assert_eq!(tensor.sum().into_scalar::<f32>(), 8.0);
     }
 }

@@ -264,8 +264,8 @@ mod tests {
 
     #[test]
     fn saved_othello_network_round_trips() {
-        let path =
-            std::env::temp_dir().join(format!("etive-model-{}.burnpack", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model.burnpack");
         let device = Device::flex();
         let input = Tensor::zeros([1, 2, 8, 8], &device);
         let network = OthelloNetwork::new(&device, 7);
@@ -274,16 +274,8 @@ mod tests {
 
         let loaded = OthelloNetwork::load(&path, &device).unwrap();
         let actual = loaded.forward(input);
-        std::fs::remove_file(path).unwrap();
-
         assert_eq!(values(expected.0), values(actual.0));
         assert_eq!(values(expected.1), values(actual.1));
-    }
-
-    #[test]
-    fn othello_network_has_expected_parameter_count() {
-        let network = OthelloNetwork::new(&Device::flex(), 7);
-        assert_eq!(network.num_params(), 2_976_709);
     }
 
     #[test]

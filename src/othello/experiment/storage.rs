@@ -337,10 +337,8 @@ mod tests {
 
     #[test]
     fn metrics_are_typed_and_match_committed_generations() {
-        let path = std::env::temp_dir().join(format!("etive-metrics-{}.csv", std::process::id()));
-        if path.exists() {
-            fs::remove_file(&path).unwrap();
-        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metrics.csv");
         File::create(&path).unwrap();
         append_metrics(
             &path,
@@ -357,16 +355,12 @@ mod tests {
         let header = fs::read_to_string(&path).unwrap();
         assert!(header.starts_with("generation,samples,training_samples"));
         assert!(header.contains("candidate_wins,baseline_wins"));
-
-        fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn clean_only_removes_recognized_runs() {
-        let output = std::env::temp_dir().join(format!("etive-clean-{}", std::process::id()));
-        if output.exists() {
-            fs::remove_dir_all(&output).unwrap();
-        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
         fs::create_dir(&output).unwrap();
 
         assert!(clean_output(&output).is_err());
@@ -384,11 +378,8 @@ mod tests {
 
     #[test]
     fn run_lock_rejects_a_second_owner() {
-        let output = std::env::temp_dir().join(format!("etive-lock-{}", std::process::id()));
-        let lock_path = suffixed_path(&output, ".lock");
-        if lock_path.exists() {
-            fs::remove_file(&lock_path).unwrap();
-        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
 
         let first = acquire_run_lock(&output).unwrap();
         let error = match acquire_run_lock(&output) {
@@ -399,19 +390,13 @@ mod tests {
 
         drop(first);
         drop(acquire_run_lock(&output).unwrap());
-        fs::remove_file(lock_path).unwrap();
     }
 
     #[test]
     fn staging_replaces_interrupted_initialization() {
-        let output = std::env::temp_dir().join(format!("etive-staging-{}", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
         let staging = suffixed_path(&output, ".initializing");
-        if output.exists() {
-            fs::remove_dir_all(&output).unwrap();
-        }
-        if staging.exists() {
-            fs::remove_dir_all(&staging).unwrap();
-        }
         fs::create_dir(&staging).unwrap();
         fs::write(staging.join("partial"), []).unwrap();
 
@@ -419,16 +404,12 @@ mod tests {
         assert!(!staging.join("partial").exists());
         assert!(!output.exists());
         assert!(staging.join("replay").is_dir());
-
-        fs::remove_dir_all(staging).unwrap();
     }
 
     #[test]
     fn recovery_requires_a_matching_committed_manifest() {
-        let output = std::env::temp_dir().join(format!("etive-recovery-{}", std::process::id()));
-        if output.exists() {
-            fs::remove_dir_all(&output).unwrap();
-        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
         let replay = output.join("replay");
         fs::create_dir_all(&replay).unwrap();
         let manifest_path = output.join("pending-self-play.toml");
@@ -471,7 +452,5 @@ mod tests {
         assert!(!manifest_path.exists());
         assert!(!validation_path.exists());
         assert!(training_path.exists());
-
-        fs::remove_dir_all(output).unwrap();
     }
 }

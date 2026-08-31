@@ -13,19 +13,16 @@ fn othello_uses_stable_square_and_pass_actions() {
     assert_eq!(action_indices(&board), [19, 26, 37, 44]);
 
     for index in 0..othello::Board::ACTION_COUNT {
-        let action = othello::Board::action_from_index(index).unwrap();
+        let action = othello::Move::from_index(index).unwrap();
         assert_eq!(othello::Board::action_index(action), index);
     }
-    assert_eq!(othello::Board::action_from_index(65), None);
+    assert_eq!(othello::Move::from_index(65), None);
 
     let a1 = othello::Square::new(0, 0).unwrap().bitboard();
     let b1 = othello::Square::new(1, 0).unwrap().bitboard();
     let pass = othello::Board::from_discs(a1, b1, othello::Color::White).unwrap();
     assert_eq!(action_indices(&pass), [64]);
-    assert_eq!(
-        othello::Board::action_from_index(64),
-        Some(othello::Move::Pass)
-    );
+    assert_eq!(othello::Move::from_index(64), Some(othello::Move::Pass));
 }
 
 #[test]

@@ -31,8 +31,6 @@ pub struct TrainingReport {
     pub elapsed: Duration,
 }
 
-pub type LossReport = PolicyValueMetrics<f32>;
-
 pub struct TrainingSession {
     optimizer: ModuleOptimizer,
     device: Device,
@@ -49,7 +47,7 @@ pub fn evaluate_loss(
     device: &Device,
     samples: &[SelfPlaySample],
     batch_size: usize,
-) -> Result<LossReport, TrainingError> {
+) -> Result<PolicyValueMetrics<f32>, TrainingError> {
     if samples.is_empty() || batch_size == 0 {
         return Err(TrainingError::InvalidInput(
             "validation data and batch size must be non-empty",
@@ -84,7 +82,7 @@ pub fn evaluate_loss(
         policy_entropy_total += target_entropy(&policies, batch.len()) * batch.len() as f32;
         value_total += value_loss.into_scalar::<f32>() * batch.len() as f32;
     }
-    Ok(LossReport::new(
+    Ok(PolicyValueMetrics::new(
         policy_total / samples.len() as f32,
         policy_entropy_total / samples.len() as f32,
         value_total / samples.len() as f32,
@@ -189,7 +187,11 @@ impl TrainingSession {
         Ok(())
     }
 
-    fn step(&mut self, network: &mut OthelloNetwork, replay: &[&[SelfPlaySample]]) -> LossReport {
+    fn step(
+        &mut self,
+        network: &mut OthelloNetwork,
+        replay: &[&[SelfPlaySample]],
+    ) -> PolicyValueMetrics<f32> {
         let sample_count = replay.iter().map(|samples| samples.len()).sum::<usize>();
         for (batch_index, outcome) in self.outcomes.iter_mut().enumerate() {
             let mut sample_index = self.random.random_range(0..sample_count);
@@ -227,7 +229,7 @@ impl TrainingSession {
         let target_value = tensor(&self.outcomes, [self.batch_size, 1], &self.device);
         let (policy_cross_entropy, value_mse) =
             self.train_tensor_step(network, input, target_policy, target_value);
-        LossReport::new(
+        PolicyValueMetrics::new(
             policy_cross_entropy,
             target_entropy(&self.policies, self.batch_size),
             value_mse,
@@ -345,17 +347,15 @@ mod tests {
             .into_data();
         assert_ne!(before.as_bytes(), after.as_bytes());
 
-        let base = std::env::temp_dir().join(format!("etive-training-{}", std::process::id()));
-        let model_path = base.with_extension("model.burnpack");
-        let optimizer_path = base.with_extension("optimizer.burnpack");
+        let directory = tempfile::tempdir().unwrap();
+        let model_path = directory.path().join("model.burnpack");
+        let optimizer_path = directory.path().join("optimizer.burnpack");
         network.save(&model_path).unwrap();
         session.save_optimizer(&optimizer_path).unwrap();
         let mut network = OthelloNetwork::load(&model_path, &device).unwrap();
         let mut session = TrainingSession::new(device, 2, 0.001, 0.0001, 11).unwrap();
         session.load_optimizer(&optimizer_path).unwrap();
         let resumed = session.train_steps(&mut network, &[&samples], 1).unwrap();
-        std::fs::remove_file(model_path).unwrap();
-        std::fs::remove_file(optimizer_path).unwrap();
         assert!(resumed.metrics.policy_cross_entropy.is_finite());
         assert!(resumed.metrics.value_mse.is_finite());
     }

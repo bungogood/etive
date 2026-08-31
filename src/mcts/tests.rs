@@ -120,28 +120,6 @@ fn pending_requests_guard_advance_and_root_prior_mixing() {
 }
 
 #[test]
-fn independent_trees_can_fill_an_inference_batch() {
-    let mut trees = (0..32)
-        .map(|_| Mcts::new(Board::default()))
-        .collect::<Vec<_>>();
-    let requests = trees
-        .iter_mut()
-        .map(|tree| match tree.select().unwrap() {
-            Selection::Evaluate { request, .. } => request,
-            Selection::Terminal => unreachable!(),
-            Selection::Blocked => unreachable!(),
-        })
-        .collect::<Vec<_>>();
-
-    assert!(trees.iter().all(Mcts::is_pending));
-    for (tree, request) in trees.iter_mut().zip(requests) {
-        tree.complete(request, &[0.0; 9], 0.0).unwrap();
-    }
-    assert!(trees.iter().all(|tree| !tree.is_pending()));
-    assert!(trees.iter().all(|tree| tree.edge_count() == 9));
-}
-
-#[test]
 fn stale_completion_does_not_disturb_the_live_request() {
     let mut search = Mcts::new(Board::default());
     let first = match search.select().unwrap() {

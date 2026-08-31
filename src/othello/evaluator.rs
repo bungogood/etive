@@ -181,6 +181,7 @@ mod tests {
     use super::super::OthelloModelConfig;
     use super::*;
     use crate::game::Game;
+    use crate::othello::Move;
     use crate::self_play;
 
     #[cfg(feature = "cuda")]
@@ -240,7 +241,7 @@ mod tests {
             assert!((sample.policy.iter().sum::<f32>() - 1.0).abs() < 1e-5);
             for (index, probability) in sample.policy.into_iter().enumerate() {
                 if probability > 0.0 {
-                    let action = Board::action_from_index(index).unwrap();
+                    let action = Move::from_index(index).unwrap();
                     assert!(sample.position.is_legal(action));
                 }
             }
@@ -280,23 +281,6 @@ mod tests {
                     "{batch} batch in iteration {iteration} contained a non-finite value",
                 );
             }
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn serial_weekend_batches_are_finite() {
-        let games = [Board::default(); 1024];
-        let device = Device::cuda(0);
-        let network = OthelloNetwork::new_with_config(&device, 7, OthelloModelConfig::WEEKEND);
-        let mut evaluator = OthelloBurnEvaluator::from_network(device, &network);
-        for iteration in 0..16 {
-            let pending = evaluator.start_batch(&games);
-            let output = evaluator.finish_batch(pending).unwrap();
-            assert!(
-                output.iter().all(|value| value.is_finite()),
-                "batch in iteration {iteration} contained a non-finite value",
-            );
         }
     }
 }

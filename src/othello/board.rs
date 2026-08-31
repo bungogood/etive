@@ -16,6 +16,16 @@ pub enum Move {
     Pass,
 }
 
+impl Move {
+    pub fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0..Square::COUNT => Square::from_index(index).map(Self::Place),
+            Square::COUNT => Some(Self::Pass),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ParseMoveError;
 
@@ -244,14 +254,6 @@ impl Game for Board {
         match action {
             Move::Place(square) => square.index(),
             Move::Pass => Square::COUNT,
-        }
-    }
-
-    fn action_from_index(index: usize) -> Option<Self::Action> {
-        match index {
-            0..Square::COUNT => Square::from_index(index).map(Move::Place),
-            Square::COUNT => Some(Move::Pass),
-            _ => None,
         }
     }
 

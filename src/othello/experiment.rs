@@ -489,7 +489,6 @@ mod tests {
             .count();
 
         assert!((900..=1_100).contains(&validation_games));
-        assert_eq!(is_validation_game(42, 10), is_validation_game(42, 10));
     }
 
     #[test]

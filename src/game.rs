@@ -70,9 +70,6 @@ pub trait Game: Copy + Send + Sync + 'static {
     /// Maps an action to its stable policy output index.
     fn action_index(action: Self::Action) -> usize;
 
-    /// Maps a policy output index back to an action.
-    fn action_from_index(index: usize) -> Option<Self::Action>;
-
     /// Plays an action already obtained from [`Game::legal_actions`].
     fn play_unchecked(&mut self, action: Self::Action);
 

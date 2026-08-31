@@ -101,10 +101,6 @@ impl Game for Board {
         action.index()
     }
 
-    fn action_from_index(index: usize) -> Option<Self::Action> {
-        Square::from_index(index)
-    }
-
     fn play_unchecked(&mut self, action: Self::Action) {
         let next_player = self.opponent;
         self.opponent = self.player | action.bit();

@@ -1,3 +1,4 @@
+use burn::module::AutodiffModule;
 use burn::tensor::{Device, FloatDType, Tensor, TensorData, TensorReadError};
 #[cfg(feature = "cuda")]
 use std::sync::OnceLock;
@@ -54,7 +55,6 @@ pub struct OthelloBurnEvaluator {
     inference_dtype: FloatDType,
     input: Vec<f32>,
     evaluations: u64,
-    batches: u64,
     compute_streams: [EvaluationStream; 2],
     next_compute_stream: usize,
     upload_stream: EvaluationStream,
@@ -83,12 +83,11 @@ impl OthelloBurnEvaluator {
     ) -> Self {
         let [compute_0, compute_1, upload] = EvaluationStream::shared();
         Self {
-            network: network.detached().cast_float(dtype),
+            network: network.valid().cast_float(dtype),
             device,
             inference_dtype: dtype,
             input: vec![0.0; OthelloEncoding::LEN],
             evaluations: 0,
-            batches: 0,
             compute_streams: [compute_0, compute_1],
             next_compute_stream: 0,
             upload_stream: upload,
@@ -97,10 +96,6 @@ impl OthelloBurnEvaluator {
 
     pub const fn evaluations(&self) -> u64 {
         self.evaluations
-    }
-
-    pub const fn batches(&self) -> u64 {
-        self.batches
     }
 }
 
@@ -142,7 +137,6 @@ impl PipelinedEvaluator<Board> for OthelloBurnEvaluator {
             .enter(|| burn::tensor::read_sync(pending.output.into_data_async()))?;
         let output = data.try_into_vec_as::<f32>()?;
         self.evaluations += pending.batch_size as u64;
-        self.batches += 1;
         Ok(output)
     }
 }
@@ -208,7 +202,6 @@ mod tests {
             .evaluate_batch(&games, &mut policies, &mut values)
             .unwrap();
         assert_eq!(evaluator.evaluations(), 8);
-        assert_eq!(evaluator.batches(), 1);
         assert!(policies.into_iter().all(f32::is_finite));
         assert!(
             values

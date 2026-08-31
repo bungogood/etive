@@ -18,9 +18,7 @@ pub mod training;
 
 pub use crate::game::Color;
 pub use bitboard::{BitBoard, BitBoardIter};
-pub use board::{
-    Board, BoardError, GameStatus, LegalActions, Move, ParseBoardError, ParseMoveError,
-};
+pub use board::{Board, BoardError, GameStatus, LegalActions, Move, ParseMoveError};
 pub use diagnostics::{DiagnosticsReport, diagnose_replay};
 pub use evaluator::OthelloBurnEvaluator;
 pub use frozen_training::{FrozenTrainingConfig, FrozenTrainingReport, train_frozen};

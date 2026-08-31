@@ -286,58 +286,6 @@ impl Game for Board {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ParseBoardError;
-
-impl fmt::Display for ParseBoardError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("expected eight 8-character rows using B, W, or . followed by side b or w")
-    }
-}
-
-impl std::error::Error for ParseBoardError {}
-
-impl FromStr for Board {
-    type Err = ParseBoardError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let mut fields = value.split_ascii_whitespace();
-        let placement = fields.next().ok_or(ParseBoardError)?;
-        let side = fields.next().ok_or(ParseBoardError)?;
-        if fields.next().is_some() {
-            return Err(ParseBoardError);
-        }
-
-        let rows: Vec<_> = placement.split('/').collect();
-        if rows.len() != 8 || rows.iter().any(|row| row.len() != 8) {
-            return Err(ParseBoardError);
-        }
-
-        let mut black = 0_u64;
-        let mut white = 0_u64;
-        for (row_index, row) in rows.into_iter().enumerate() {
-            let rank = 7 - row_index as u8;
-            for (file, disc) in row.bytes().enumerate() {
-                let bit = 1_u64 << (rank * 8 + file as u8);
-                match disc {
-                    b'B' | b'b' => black |= bit,
-                    b'W' | b'w' => white |= bit,
-                    b'.' => {}
-                    _ => return Err(ParseBoardError),
-                }
-            }
-        }
-
-        let side_to_move = match side {
-            "b" | "B" => Color::Black,
-            "w" | "W" => Color::White,
-            _ => return Err(ParseBoardError),
-        };
-        Board::from_discs(BitBoard(black), BitBoard(white), side_to_move)
-            .map_err(|_| ParseBoardError)
-    }
-}
-
 impl fmt::Display for Board {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let black = self.discs(Color::Black);

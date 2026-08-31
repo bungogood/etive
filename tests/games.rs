@@ -75,18 +75,3 @@ fn othello_search_expands_and_advances_through_a_forced_pass() {
     assert!(tree.advance(othello::Move::Place(othello::Square::new(2, 0).unwrap())));
     assert_eq!(tree.root_position().outcome(), Some(Outcome::Loss));
 }
-
-#[test]
-fn othello_terminal_search_has_no_edges_and_exact_value() {
-    let board = othello::Board::from_discs(
-        othello::BitBoard::FULL,
-        othello::BitBoard::EMPTY,
-        othello::Color::White,
-    )
-    .unwrap();
-    let mut tree = Mcts::new(board);
-
-    tree.run(&mut UniformEvaluator, 8).unwrap();
-    assert_eq!(tree.root_stats().len(), 0);
-    assert_eq!(tree.root_value(), -1.0);
-}

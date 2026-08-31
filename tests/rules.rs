@@ -73,14 +73,6 @@ fn overlapping_discs_are_rejected() {
 }
 
 #[test]
-fn board_text_round_trips() {
-    let board = Board::default();
-    let encoded = "......../......../......../...BW.../...WB.../......../......../........ b";
-    assert_eq!(board.to_string(), encoded);
-    assert_eq!(Board::from_str(encoded).unwrap(), board);
-}
-
-#[test]
 #[ignore = "deep perft verification"]
 fn published_deep_initial_position_perft() {
     let board = Board::default();
@@ -153,16 +145,4 @@ fn forced_pass_is_a_ply_and_double_pass_ends_the_game() {
     board.play(Move::Place(square("c1")));
     assert_eq!(board.status(), GameStatus::Won(Color::Black));
     assert!(!board.is_pass_legal());
-}
-
-#[test]
-fn malformed_positions_are_rejected() {
-    for position in [
-        "......../......../......../...BW.../...WB.../......../........ b",
-        "......../......../......../...BX.../...WB.../......../......../........ b",
-        "......../......../......../...BW.../...WB.../......../......../........ x",
-        "......../......../......../...BW.../...WB.../......../......../........ b trailing",
-    ] {
-        assert!(Board::from_str(position).is_err(), "{position}");
-    }
 }

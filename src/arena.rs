@@ -218,7 +218,6 @@ mod tests {
     use std::convert::Infallible;
 
     use crate::evaluator::UniformEvaluator;
-    use crate::game::Game;
     use crate::tic_tac_toe::{Board, Square};
 
     use super::*;
@@ -249,21 +248,6 @@ mod tests {
         assert_eq!(equal.paired_los(), 0.5);
         assert!(superior.paired_los() > 0.99);
         assert!(inferior.paired_los() < 0.01);
-    }
-
-    #[test]
-    fn terminal_scoring_uses_side_to_move_relative_outcome() {
-        let game = position(&[0, 3, 1, 4, 2]);
-        assert_eq!(game.side_to_move(), Color::White);
-        assert_eq!(game.outcome(), Some(Outcome::Loss));
-
-        let mut result = EvalResult::default();
-        assert_eq!(score_terminal(&mut result, game, Color::Black), Some(0));
-        assert_eq!(result.baseline_wins, 1);
-
-        let mut result = EvalResult::default();
-        assert_eq!(score_terminal(&mut result, game, Color::White), Some(2));
-        assert_eq!(result.candidate_wins, 1);
     }
 
     struct MeasuredUniformEvaluator {

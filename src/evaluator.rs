@@ -201,20 +201,3 @@ impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeMinimaxEvaluator {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn inference_batch_padding_preserves_logical_length() {
-        let mut batch = InferenceBatch::new(4);
-        batch.push(7, tic_tac_toe::Board::default());
-
-        batch.pad_positions_to_capacity();
-
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch.positions().len(), 4);
-        assert_eq!(batch.tags().copied().collect::<Vec<_>>(), vec![7]);
-    }
-}

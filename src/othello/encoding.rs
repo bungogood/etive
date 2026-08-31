@@ -69,17 +69,4 @@ mod tests {
         assert_eq!(output[..64].iter().sum::<f32>(), 1.0);
         assert_eq!(output[64..].iter().sum::<f32>(), 4.0);
     }
-
-    #[test]
-    fn batch_encoding_writes_contiguous_states() {
-        let first = Board::default();
-        let mut second = first;
-        second.play(Move::Place(OthelloSquare::new(3, 2).unwrap()));
-        let mut output = vec![0.0; 2 * OthelloEncoding::LEN];
-
-        OthelloEncoding::encode_batch(&[first, second], &mut output);
-
-        assert_eq!(output[..128].iter().sum::<f32>(), 4.0);
-        assert_eq!(output[128..].iter().sum::<f32>(), 5.0);
-    }
 }

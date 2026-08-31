@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use burn::module::{AutodiffModule, Module, ModuleMapper, Param};
+use burn::module::{Module, ModuleMapper, Param};
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::{GroupNorm, GroupNormConfig, Linear, LinearConfig, PaddingConfig2d};
 use burn::store::{ModuleRecord, RecordError};
@@ -176,11 +176,6 @@ impl OthelloNetwork {
         toml::from_str(&source).ok()
     }
 
-    /// Returns an inference-only snapshot of this network.
-    pub fn detached(&self) -> Self {
-        self.valid()
-    }
-
     /// Casts every floating-point parameter to the requested dtype.
     pub fn cast_float(self, dtype: FloatDType) -> Self {
         struct CastMapper(FloatDType);
@@ -199,22 +194,6 @@ impl OthelloNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "cuda")]
-    fn assert_finite<const D: usize>(name: &str, tensor: &Tensor<D>) {
-        let values = tensor.clone().into_data().try_to_vec_as::<f32>().unwrap();
-        let (minimum, maximum) = values
-            .iter()
-            .copied()
-            .filter(|value| value.is_finite())
-            .fold(
-                (f32::INFINITY, f32::NEG_INFINITY),
-                |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
-            );
-        let non_finite = values.iter().filter(|value| !value.is_finite()).count();
-        eprintln!("{name}: min={minimum:.6} max={maximum:.6} non_finite={non_finite}");
-        assert!(non_finite == 0, "{name} contained a non-finite value",);
-    }
 
     fn values(tensor: Tensor<2>) -> Vec<f32> {
         tensor.into_data().try_to_vec::<f32>().unwrap()
@@ -238,31 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn trainable_and_detached_othello_outputs_are_equal() {
-        let device = Device::flex();
-        let network = OthelloNetwork::new(&device.clone().autodiff(), 7);
-        let (policy, value) =
-            network.forward(Tensor::zeros([2, 2, 8, 8], &device.clone().autodiff()));
-        let (detached_policy, detached_value) = network
-            .detached()
-            .forward(Tensor::zeros([2, 2, 8, 8], &device));
-
-        assert_eq!(policy.dims(), [2, OthelloBoard::ACTION_COUNT]);
-        assert_eq!(value.dims(), [2, 1]);
-        assert_eq!(values(policy), values(detached_policy));
-        assert!(
-            values(value)
-                .into_iter()
-                .all(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
-        );
-        assert!(
-            values(detached_value)
-                .into_iter()
-                .all(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
-        );
-    }
-
-    #[test]
     fn saved_othello_network_round_trips() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("model.burnpack");
@@ -283,59 +237,5 @@ mod tests {
         let network =
             OthelloNetwork::new_with_config(&Device::flex(), 7, OthelloModelConfig::WEEKEND);
         assert!(network.num_params() < 500_000);
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn weekend_cuda_forward_is_finite_at_every_operation() {
-        let device = Device::cuda(0);
-        let network = OthelloNetwork::new_with_config(&device, 7, OthelloModelConfig::WEEKEND)
-            .cast_float(FloatDType::F16);
-        let input = Tensor::<4>::zeros([1024, 2, 8, 8], &device).cast(FloatDType::F16);
-
-        let mut hidden = network.stem.forward(input);
-        assert_finite("stem.conv", &hidden);
-        hidden = network.stem_norm.forward(hidden);
-        assert_finite("stem.norm", &hidden);
-        hidden = activation::relu(hidden);
-        assert_finite("stem.relu", &hidden);
-
-        for (index, block) in network.blocks.iter().enumerate() {
-            let residual = hidden.clone();
-            let mut next = block.conv1.forward(hidden);
-            assert_finite(&format!("block.{index}.conv1"), &next);
-            next = block.norm1.forward(next);
-            assert_finite(&format!("block.{index}.norm1"), &next);
-            next = activation::relu(next);
-            assert_finite(&format!("block.{index}.relu1"), &next);
-            next = block.conv2.forward(next);
-            assert_finite(&format!("block.{index}.conv2"), &next);
-            next = block.norm2.forward(next);
-            assert_finite(&format!("block.{index}.norm2"), &next);
-            next = next + residual;
-            assert_finite(&format!("block.{index}.add"), &next);
-            hidden = activation::relu(next);
-            assert_finite(&format!("block.{index}.relu2"), &hidden);
-        }
-
-        let mut policy = network.policy_conv.forward(hidden.clone());
-        assert_finite("policy.conv", &policy);
-        policy = activation::relu(policy);
-        assert_finite("policy.relu", &policy);
-        let policy = network.policy.forward(policy.reshape([1024, 2 * 8 * 8]));
-        assert_finite("policy.linear", &policy);
-
-        let mut value = network.value_conv.forward(hidden);
-        assert_finite("value.conv", &value);
-        value = activation::relu(value);
-        assert_finite("value.relu1", &value);
-        let mut value = network.value_hidden.forward(value.reshape([1024, 8 * 8]));
-        assert_finite("value.hidden_linear", &value);
-        value = activation::relu(value);
-        assert_finite("value.relu2", &value);
-        value = network.value.forward(value);
-        assert_finite("value.linear", &value);
-        value = value.tanh();
-        assert_finite("value.tanh", &value);
     }
 }

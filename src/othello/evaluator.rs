@@ -3,7 +3,7 @@ use burn::tensor::{Device, FloatDType, Tensor, TensorData, TensorReadError};
 use std::sync::OnceLock;
 
 use super::{Board, OthelloEncoding, OthelloNetwork};
-use crate::evaluator::{BatchEvaluator, PipelinedEvaluator};
+use crate::evaluator::{BatchEvaluator, EvaluationCounter, PipelinedEvaluator};
 use crate::game::Game;
 
 #[cfg(feature = "cuda")]
@@ -182,6 +182,12 @@ impl BatchEvaluator<Board> for OthelloBurnEvaluator {
             values[index] = row[Board::ACTION_COUNT];
         }
         Ok(())
+    }
+}
+
+impl EvaluationCounter for OthelloBurnEvaluator {
+    fn evaluations(&self) -> u64 {
+        self.evaluations()
     }
 }
 

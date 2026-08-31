@@ -19,6 +19,11 @@ pub trait BatchEvaluator<G: Game> {
     ) -> Result<(), Self::Error>;
 }
 
+/// Reports the cumulative number of positions evaluated.
+pub trait EvaluationCounter {
+    fn evaluations(&self) -> u64;
+}
+
 /// Starts model work separately from collecting its packed policy/value output.
 pub trait PipelinedEvaluator<G: Game> {
     type Error;

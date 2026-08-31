@@ -77,6 +77,7 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
@@ -143,15 +144,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let device = burn_device();
                 let network = OthelloNetwork::load(path, &device)?;
                 let evaluator = OthelloBurnEvaluator::from_network(device, &network);
-                gtp::run_with_evaluator(
-                    stdin.lock(),
-                    stdout.lock(),
-                    evaluator,
-                    simulations,
-                    batch_size,
-                )?;
+                gtp::run_with_evaluator(stdin.lock(), stdout, evaluator, simulations, batch_size)?;
             } else {
-                gtp::run(stdin.lock(), stdout.lock())?;
+                gtp::run(stdin.lock(), stdout)?;
             }
         }
         Command::Train { config, clean } => {

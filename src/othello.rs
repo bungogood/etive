@@ -13,6 +13,7 @@ mod movegen;
 mod perft;
 mod replay;
 mod square;
+mod temporary;
 pub mod training;
 
 pub use crate::game::Color;

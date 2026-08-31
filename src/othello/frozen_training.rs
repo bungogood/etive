@@ -58,7 +58,7 @@ pub fn train_frozen(
     }
 
     let staging = prepare_frozen_output(&config.output)?;
-    let result = (|| {
+    (|| {
         let model_config = resolve_checkpoint_config(checkpoint.as_ref());
         let training_device = device.autodiff();
         let mut network =
@@ -87,20 +87,22 @@ pub fn train_frozen(
             value_mse: training.metrics.value_mse,
         };
 
-        network.save(staging.join("model.burnpack"))?;
-        trainer.save_optimizer(staging.join("optimizer.burnpack"))?;
-        fs::write(staging.join("model.toml"), toml::to_string(&model_config)?)?;
-        write_csv(fs::File::create(staging.join("metrics.csv"))?, &report)?;
+        network.save(staging.path().join("model.burnpack"))?;
+        trainer.save_optimizer(staging.path().join("optimizer.burnpack"))?;
+        fs::write(
+            staging.path().join("model.toml"),
+            toml::to_string(&model_config)?,
+        )?;
+        write_csv(
+            fs::File::create(staging.path().join("metrics.csv"))?,
+            &report,
+        )?;
         if config.output.exists() {
             return Err(invalid_input("output already exists"));
         }
-        fs::rename(&staging, &config.output)?;
+        fs::rename(staging.path(), &config.output)?;
         Ok(report)
-    })();
-    if result.is_err() && staging.exists() {
-        fs::remove_dir_all(staging)?;
-    }
-    result
+    })()
 }
 
 fn validate_frozen_training(
@@ -129,35 +131,18 @@ fn resolve_checkpoint_config(checkpoint: &Path) -> OthelloModelConfig {
     OthelloNetwork::checkpoint_config(checkpoint).unwrap_or(OthelloModelConfig::LEGACY)
 }
 
-fn prepare_frozen_output(output: &Path) -> Result<PathBuf, Box<dyn Error>> {
+fn prepare_frozen_output(output: &Path) -> Result<tempfile::TempDir, Box<dyn Error>> {
     if output.exists() {
         return Err(invalid_input("output already exists"));
     }
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    for attempt in 0..1000 {
-        let staging = suffixed_path(
-            output,
-            &format!(".train-frozen-{}-{attempt}.tmp", std::process::id()),
-        );
-        match fs::create_dir(&staging) {
-            Ok(()) => return Ok(staging),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "unable to create a unique output staging directory",
-    )
-    .into())
-}
-
-fn suffixed_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_owned();
-    value.push(suffix);
-    value.into()
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    Ok(tempfile::Builder::new()
+        .prefix(".train-frozen-")
+        .tempdir_in(parent)?)
 }
 
 fn invalid_input(message: &str) -> Box<dyn Error> {

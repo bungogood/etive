@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::OthelloNetwork;
 use super::super::replay::{SelfPlaySample, read_replay, validation_replay_path};
+use super::super::temporary::atomic_file_save;
 use super::super::training::TrainingSession;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -237,33 +238,28 @@ pub(super) fn atomic_network_save(
     network: &OthelloNetwork,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    network.save(&temporary)?;
-    fs::rename(&temporary, path)?;
-    Ok(())
+    atomic_file_save(path, |temporary| {
+        network.save(temporary)?;
+        Ok(())
+    })
 }
 
 pub(super) fn atomic_optimizer_save(
     trainer: &TrainingSession,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    trainer.save_optimizer(&temporary)?;
-    fs::rename(&temporary, path)?;
-    Ok(())
+    atomic_file_save(path, |temporary| {
+        trainer.save_optimizer(temporary)?;
+        Ok(())
+    })
 }
 
 pub(super) fn atomic_toml_save(path: &Path, value: &impl Serialize) -> Result<(), Box<dyn Error>> {
-    let temporary = temporary_path(path);
-    fs::write(&temporary, toml::to_string(value)?)?;
-    fs::rename(temporary, path)?;
-    Ok(())
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
+    let source = toml::to_string(value)?;
+    atomic_file_save(path, |temporary| {
+        fs::write(temporary, source)?;
+        Ok(())
+    })
 }
 
 pub(super) fn verify_run_marker(output: &Path) -> io::Result<()> {

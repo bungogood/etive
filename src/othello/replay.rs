@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use crate::game::{Game, Outcome};
 use crate::othello::Board;
 
+use super::temporary::atomic_file_save;
+
 pub type SelfPlaySample = crate::self_play::Sample<Board>;
 
 const FORMAT_VERSION: u8 = 2;
@@ -54,10 +56,10 @@ pub(super) fn atomic_replay_save(
 ) -> Result<(), Box<dyn Error>> {
     validate_samples(samples)?;
     let bytes = bincode::encode_to_vec((FORMAT_VERSION, samples), bincode::config::standard())?;
-    let temporary = path.with_extension("bin.tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    atomic_file_save(path, |temporary| {
+        fs::write(temporary, bytes)?;
+        Ok(())
+    })
 }
 
 pub(crate) fn read_replay(path: &Path) -> Result<Vec<SelfPlaySample>, Box<dyn Error>> {

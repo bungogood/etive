@@ -13,10 +13,7 @@ use crate::metrics::PolicyValueMetrics;
 use crate::self_play;
 
 use super::evaluation::{EvalConfig, EvalResult, evaluate};
-use super::replay::{
-    SelfPlaySample, atomic_replay_save, load_replay, replay_path, trim_replay,
-    validation_replay_path,
-};
+use super::replay::{SelfPlaySample, atomic_replay_save, load_replay, replay_path, trim_replay};
 use super::training::{TrainingSession, evaluate_loss};
 use super::{Board, OthelloBurnEvaluator, OthelloNetwork};
 
@@ -27,11 +24,18 @@ pub use config::{SelfPlayBenchmarkConfig, load_self_play_benchmark_config};
 
 use config::{Config, resolve_paths, validate};
 use storage::{
-    GenerationMetrics, GenerationSelfPlay, PendingSelfPlay, RUN_MARKER, RunState, acquire_run_lock,
-    append_metrics, atomic_network_save, atomic_optimizer_save, atomic_toml_save, checkpoint_path,
-    clean_output, discard_committed_self_play, optimizer_path, prepare_staging, recover_self_play,
-    validate_metrics, validate_run_state, verify_run_marker,
+    GenerationMetrics, RUN_MARKER, RunState, acquire_run_lock, append_metrics, atomic_network_save,
+    atomic_optimizer_save, atomic_toml_save, checkpoint_path, clean_output, optimizer_path,
+    prepare_staging, validate_metrics, validate_run_state, verify_run_marker,
 };
+
+struct GenerationSelfPlay {
+    training: Vec<SelfPlaySample>,
+    validation: Vec<SelfPlaySample>,
+    elapsed_seconds: f64,
+    evaluations: u64,
+    unique_games: usize,
+}
 
 pub fn run(
     config_path: impl AsRef<Path>,
@@ -154,10 +158,7 @@ fn run_loop(
     let run_seconds = config.hours * 60.0 * 60.0;
     let state_path = config.output.join("state.toml");
     let metrics_path = config.output.join("metrics.csv");
-    discard_committed_self_play(&config.output, generation)?;
-    let mut recovered_elapsed = 0.0;
-
-    while prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64() < run_seconds {
+    while prior_elapsed + run_start.elapsed().as_secs_f64() < run_seconds {
         generation += 1;
         let generation_span = info_span!("generation", number = generation);
         let _generation_guard = generation_span.enter();
@@ -166,23 +167,19 @@ fn run_loop(
                 checkpoint_path(&config.output, champion_generation),
                 &device,
             )?;
-            generate_or_recover_self_play(&config, &device, &self_play_network, generation)?
+            generate_self_play(&config, &device, &self_play_network, generation)?
         };
         cleanup_device_memory(&device, "self-play")?;
-        if self_play.recovered {
-            recovered_elapsed += self_play.pending.elapsed_seconds;
-        }
         let GenerationSelfPlay {
             training,
             validation,
-            pending,
-            ..
+            elapsed_seconds: self_play_seconds,
+            evaluations,
+            unique_games,
         } = self_play;
-        let sample_count = pending.training_samples + pending.validation_samples;
-        let training_sample_count = pending.training_samples;
-        let validation_sample_count = pending.validation_samples;
-        let evaluations = pending.evaluations;
-        let unique_games = pending.unique_games;
+        let sample_count = training.len() + validation.len();
+        let training_sample_count = training.len();
+        let validation_sample_count = validation.len();
         replay.push_back(training);
         trim_replay(&mut replay, config.train.replay_positions);
         let replay_samples = replay.iter().map(Vec::len).sum::<usize>();
@@ -190,11 +187,11 @@ fn run_loop(
             positions = sample_count,
             unique_games,
             evaluations,
-            elapsed = %format_args!("{:.1}s", pending.elapsed_seconds),
+            elapsed = %format_args!("{self_play_seconds:.1}s"),
             "self-play complete"
         );
 
-        let total_elapsed = prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64();
+        let total_elapsed = prior_elapsed + run_start.elapsed().as_secs_f64();
         let progress = (total_elapsed / run_seconds).min(1.0);
         let learning_rate = config.train.learning_rate
             * (config.train.final_learning_rate / config.train.learning_rate).powf(progress);
@@ -287,10 +284,10 @@ fn run_loop(
                 training_samples: training_sample_count,
                 validation_samples: validation_sample_count,
                 replay_samples,
-                self_play_seconds: rounded(pending.elapsed_seconds, 3),
+                self_play_seconds: rounded(self_play_seconds, 3),
                 self_play_evaluations: evaluations,
                 self_play_evaluations_per_second: rounded(
-                    evaluations as f64 / pending.elapsed_seconds.max(f64::MIN_POSITIVE),
+                    evaluations as f64 / self_play_seconds.max(f64::MIN_POSITIVE),
                     1,
                 ),
                 learning_rate: rounded(learning_rate, 8),
@@ -335,44 +332,29 @@ fn run_loop(
             &RunState {
                 generation,
                 champion_generation,
-                elapsed_seconds: prior_elapsed
-                    + recovered_elapsed
-                    + run_start.elapsed().as_secs_f64(),
+                elapsed_seconds: prior_elapsed + run_start.elapsed().as_secs_f64(),
             },
         )?;
-        discard_committed_self_play(&config.output, generation)?;
         cleanup_device_memory(&device, "generation")?;
     }
     info!(
         generation,
         elapsed = %format_args!(
             "{:.1}s",
-            prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64()
+            prior_elapsed + run_start.elapsed().as_secs_f64()
         ),
         "experiment complete"
     );
     Ok(())
 }
 
-fn generate_or_recover_self_play(
+fn generate_self_play(
     config: &Config,
     device: &Device,
     network: &OthelloNetwork,
     generation: usize,
 ) -> Result<GenerationSelfPlay, Box<dyn Error>> {
-    let pending_path = config.output.join("pending-self-play.toml");
     let training_path = replay_path(&config.output, generation);
-    let validation_path = validation_replay_path(&config.output, generation);
-    if let Some(recovered) =
-        recover_self_play(&pending_path, &training_path, &validation_path, generation)?
-    {
-        info!(
-            positions = recovered.training.len() + recovered.validation.len(),
-            "recovered persisted self-play"
-        );
-        return Ok(recovered);
-    }
-
     info!("starting self-play");
     let start = Instant::now();
     let self_play = self_play::run::<Board, _>(
@@ -382,22 +364,13 @@ fn generate_or_recover_self_play(
     )?;
     let (training, validation) =
         split_training_validation(self_play.samples, config.train.validation_game_modulus);
-    let pending = PendingSelfPlay {
-        generation,
-        training_samples: training.len(),
-        validation_samples: validation.len(),
-        elapsed_seconds: start.elapsed().as_secs_f64(),
-        evaluations: self_play.evaluations,
-        unique_games: self_play.unique_games,
-    };
     atomic_replay_save(&training, &training_path)?;
-    atomic_replay_save(&validation, &validation_path)?;
-    atomic_toml_save(&pending_path, &pending)?;
     Ok(GenerationSelfPlay {
         training,
         validation,
-        pending,
-        recovered: false,
+        elapsed_seconds: start.elapsed().as_secs_f64(),
+        evaluations: self_play.evaluations,
+        unique_games: self_play.unique_games,
     })
 }
 

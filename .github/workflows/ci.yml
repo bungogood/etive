@@ -16,15 +16,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: Check formatting
-        run: |
-          cargo fmt --all -- --check
-          cargo fmt --manifest-path benchmarks/architecture-throughput/Cargo.toml -- --check
+        run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Check CubeCL CPU backend
         run: cargo check --locked --no-default-features --features cpu
-      - name: Check architecture benchmark
-        run: cargo check --locked --manifest-path benchmarks/architecture-throughput/Cargo.toml
       - name: Test
         run: cargo test --locked --release
       - name: Run deep perft tests

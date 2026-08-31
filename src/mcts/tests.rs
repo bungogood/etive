@@ -2,19 +2,7 @@ use std::convert::Infallible;
 
 use super::*;
 use crate::evaluator::{BatchEvaluator, TicTacToeMinimaxEvaluator, UniformEvaluator};
-use crate::tic_tac_toe::{Board, Square};
-
-fn square(index: usize) -> Square {
-    Square::from_index(index).unwrap()
-}
-
-fn position(actions: &[usize]) -> Board {
-    let mut board = Board::default();
-    for &action in actions {
-        board.play(square(action));
-    }
-    board
-}
+use crate::tic_tac_toe::{Board, position, square};
 
 #[test]
 fn expansion_appends_one_contiguous_edge_range() {

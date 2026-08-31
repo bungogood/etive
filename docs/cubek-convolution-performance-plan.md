@@ -288,13 +288,10 @@ Update every CubeK patch entry in Etive to the same fork commit. Then run:
 cargo check --features cuda
 cargo run --release --no-default-features --features cuda -- \
   bench experiments/weekend-benchmark.toml
-cargo run --release --manifest-path benchmarks/architecture-throughput/Cargo.toml -- \
-  --batch 1024 --warmup 50 --iterations 500 --norm group
 ```
 
 Compare:
 
-- Raw forward milliseconds per batch.
 - Positions per second.
 - Residual convolution kernel time and count.
 - Full-batch and small-tail self-play throughput.

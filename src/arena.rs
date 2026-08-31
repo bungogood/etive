@@ -218,17 +218,9 @@ mod tests {
     use std::convert::Infallible;
 
     use crate::evaluator::UniformEvaluator;
-    use crate::tic_tac_toe::{Board, Square};
+    use crate::tic_tac_toe::{Board, position};
 
     use super::*;
-
-    fn position(actions: &[usize]) -> Board {
-        let mut board = Board::default();
-        for &index in actions {
-            board.play(Square::from_index(index).unwrap());
-        }
-        board
-    }
 
     #[test]
     fn paired_los_uses_position_pairs_as_observations() {

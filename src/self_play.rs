@@ -594,21 +594,13 @@ fn shard_len(games: usize, workers: usize, worker: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use crate::game::Game;
-    use crate::tic_tac_toe::{Board, Square};
+    use crate::tic_tac_toe::position;
 
     use super::*;
 
-    fn terminal_board() -> Board {
-        let mut board = Board::default();
-        for index in [0, 3, 1, 4, 2] {
-            board.play(Square::from_index(index).unwrap());
-        }
-        board
-    }
-
     #[test]
     fn terminal_outcomes_are_side_relative() {
-        let terminal = terminal_board();
+        let terminal = position(&[0, 3, 1, 4, 2]);
         assert_eq!(terminal.outcome(), Some(Outcome::Loss));
         assert_eq!(outcome_for(Color::White, terminal), Outcome::Loss);
         assert_eq!(outcome_for(Color::Black, terminal), Outcome::Win);

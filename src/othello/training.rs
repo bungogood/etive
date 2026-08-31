@@ -320,6 +320,19 @@ mod tests {
 
     use super::*;
 
+    fn sample(outcome: Outcome) -> SelfPlaySample {
+        let mut policy = [0.0; Board::ACTION_COUNT];
+        for action in Board::default().legal_actions() {
+            policy[Board::action_index(action)] = 0.25;
+        }
+        SelfPlaySample {
+            position: Board::default(),
+            policy,
+            outcome,
+            game: 1,
+        }
+    }
+
     #[test]
     fn optimizer_consumes_soft_policy_and_value_targets() {
         let inference_device = Device::flex();
@@ -330,17 +343,7 @@ mod tests {
             .forward(Tensor::zeros([1, 2, 8, 8], &inference_device))
             .0
             .into_data();
-        let mut policy = [0.0; Board::ACTION_COUNT];
-        for action in Board::default().legal_actions() {
-            policy[Board::action_index(action)] = 0.25;
-        }
-        let sample = SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Draw,
-            game: 1,
-        };
-        let samples = [sample];
+        let samples = [sample(Outcome::Draw)];
 
         let mut session = TrainingSession::new(device.clone(), 2, 0.001, 0.0001, 11).unwrap();
         let report = session.train_steps(&mut network, &[&samples], 1).unwrap();
@@ -376,16 +379,7 @@ mod tests {
         let inference_device = Device::flex();
         let device = inference_device.clone().autodiff();
         let mut network = OthelloNetwork::new_with_config(&device, 7, OthelloModelConfig::WEEKEND);
-        let mut policy = [0.0; Board::ACTION_COUNT];
-        for action in Board::default().legal_actions() {
-            policy[Board::action_index(action)] = 0.25;
-        }
-        let samples = [SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Win,
-            game: 1,
-        }];
+        let samples = [sample(Outcome::Win)];
         let initial = evaluate_loss(&network, &inference_device, &samples, 1).unwrap();
         let mut session = TrainingSession::new(device, 16, 0.001, 0.0001, 11).unwrap();
 
@@ -408,19 +402,11 @@ mod tests {
         let inference_device = Device::cuda(0);
         let device = inference_device.clone().autodiff();
         let mut network = OthelloNetwork::new(&device, 7);
-        let mut policy = [0.0; Board::ACTION_COUNT];
-        for action in Board::default().legal_actions() {
-            policy[Board::action_index(action)] = 0.25;
-        }
-        let sample = SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Draw,
-            game: 1,
-        };
         let mut session = TrainingSession::new(device, 2, 0.001, 0.0001, 11).unwrap();
 
-        let report = session.train_steps(&mut network, &[&[sample]], 1).unwrap();
+        let report = session
+            .train_steps(&mut network, &[&[sample(Outcome::Draw)]], 1)
+            .unwrap();
         let (policy, value) = network
             .valid()
             .forward(Tensor::zeros([1, 2, 8, 8], &inference_device));

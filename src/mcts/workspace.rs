@@ -106,7 +106,7 @@ impl<G: Game> SearchWorkspace<G> {
 #[cfg(test)]
 mod tests {
     use crate::evaluator::{BatchEvaluator, UniformEvaluator};
-    use crate::tic_tac_toe::{Board, Square};
+    use crate::tic_tac_toe::{Board, position};
 
     use super::*;
 
@@ -133,14 +133,6 @@ mod tests {
             values.fill(if self.invalid { 2.0 } else { 0.0 });
             Ok(())
         }
-    }
-
-    fn position(actions: &[usize]) -> Board {
-        let mut board = Board::default();
-        for &index in actions {
-            board.play(Square::from_index(index).unwrap());
-        }
-        board
     }
 
     #[test]

@@ -3,13 +3,9 @@ use std::time::Instant;
 
 use burn::tensor::Device;
 use clap::{Parser, Subcommand};
-use etive::metrics::write_csv;
 use etive::othello::evaluation::{EvalConfig, evaluate};
 use etive::othello::experiment;
-use etive::othello::{
-    Board, FrozenTrainingConfig, OthelloBurnEvaluator, OthelloNetwork, diagnose_replay, perft,
-    train_frozen,
-};
+use etive::othello::{Board, OthelloBurnEvaluator, OthelloNetwork, perft};
 use etive::self_play;
 use tracing_subscriber::EnvFilter;
 
@@ -70,54 +66,6 @@ enum Command {
     Bench {
         /// Experiment TOML supplying model and self-play settings.
         config: PathBuf,
-    },
-    /// Compare a checkpoint's predictions with validated replay targets.
-    DiagnoseReplay {
-        /// Checkpoint to evaluate.
-        checkpoint: PathBuf,
-        /// Replay shards, flattened in command-line order.
-        #[arg(required = true)]
-        replay: Vec<PathBuf>,
-        /// Number of replay rows to sample; values above availability are clamped.
-        #[arg(long)]
-        rows: Option<usize>,
-        /// Reproducible sampling seed.
-        #[arg(long, default_value_t = 7)]
-        seed: u64,
-        /// Maximum positions in one network invocation.
-        #[arg(long, default_value_t = 1024)]
-        batch_size: usize,
-        /// Evaluate with FP32 instead of production FP16 inference.
-        #[arg(long)]
-        float32: bool,
-    },
-    /// Train a checkpoint for a fixed number of steps over frozen replay shards.
-    TrainFrozen {
-        /// Model checkpoint to restore.
-        checkpoint: PathBuf,
-        /// Optimizer checkpoint to restore.
-        optimizer: PathBuf,
-        /// Validated replay shard; repeat to supply multiple shards in order.
-        #[arg(long, required = true)]
-        replay: Vec<PathBuf>,
-        /// Exact number of optimizer steps to perform.
-        #[arg(long, required = true, value_parser = parse_positive_usize)]
-        steps: usize,
-        /// Samples drawn per optimizer step.
-        #[arg(long, default_value_t = 128)]
-        batch_size: usize,
-        /// AdamW learning rate.
-        #[arg(long, default_value_t = 0.001)]
-        learning_rate: f64,
-        /// AdamW weight decay.
-        #[arg(long, default_value_t = 0.0001)]
-        weight_decay: f32,
-        /// Reproducible sampling and augmentation seed.
-        #[arg(long, default_value_t = 7)]
-        seed: u64,
-        /// New directory for the trained artifacts and metrics.
-        #[arg(long, required = true)]
-        output: PathBuf,
     },
     /// Count opening-position leaves.
     Perft {
@@ -210,61 +158,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             experiment::run(config, burn_device(), clean)?;
         }
         Command::Bench { config } => benchmark_self_play(&burn_device(), &config)?,
-        Command::DiagnoseReplay {
-            checkpoint,
-            replay,
-            rows,
-            seed,
-            batch_size,
-            float32,
-        } => {
-            let report = diagnose_replay(
-                checkpoint,
-                &replay,
-                rows,
-                seed,
-                batch_size,
-                float32,
-                burn_device(),
-            )?;
-            write_csv(std::io::stdout().lock(), &report)?;
-        }
-        Command::TrainFrozen {
-            checkpoint,
-            optimizer,
-            replay,
-            steps,
-            batch_size,
-            learning_rate,
-            weight_decay,
-            seed,
-            output,
-        } => {
-            let report = train_frozen(
-                checkpoint,
-                optimizer,
-                &replay,
-                FrozenTrainingConfig {
-                    steps,
-                    batch_size,
-                    learning_rate,
-                    weight_decay,
-                    seed,
-                    output,
-                },
-                burn_device(),
-            )?;
-            write_csv(std::io::stdout().lock(), &report)?;
-        }
     }
     Ok(())
-}
-
-fn parse_positive_usize(value: &str) -> Result<usize, String> {
-    match value.parse::<usize>() {
-        Ok(value) if value > 0 => Ok(value),
-        _ => Err("value must be a positive integer".to_owned()),
-    }
 }
 
 fn benchmark_self_play(
@@ -325,52 +220,4 @@ fn burn_device() -> Device {
         feature = "cpu"
     ))]
     Device::cpu()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn train_frozen_cli_preserves_replay_order_and_requires_positive_steps() {
-        let cli = Cli::try_parse_from([
-            "etive",
-            "train-frozen",
-            "model.burnpack",
-            "optimizer.burnpack",
-            "--replay",
-            "first.bin",
-            "--replay",
-            "second.bin",
-            "--steps",
-            "2",
-            "--output",
-            "trained",
-        ])
-        .unwrap();
-        let Command::TrainFrozen { replay, steps, .. } = cli.command else {
-            panic!("expected train-frozen command");
-        };
-        assert_eq!(
-            replay,
-            [PathBuf::from("first.bin"), PathBuf::from("second.bin")]
-        );
-        assert_eq!(steps, 2);
-
-        assert!(
-            Cli::try_parse_from([
-                "etive",
-                "train-frozen",
-                "model.burnpack",
-                "optimizer.burnpack",
-                "--replay",
-                "replay.bin",
-                "--steps",
-                "0",
-                "--output",
-                "trained",
-            ])
-            .is_err()
-        );
-    }
 }

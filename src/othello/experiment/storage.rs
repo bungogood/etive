@@ -1,13 +1,11 @@
 use std::error::Error;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::super::OthelloNetwork;
-use super::super::replay::{SelfPlaySample, read_replay, validation_replay_path};
 use super::super::temporary::atomic_file_save;
 use super::super::training::TrainingSession;
 
@@ -60,75 +58,8 @@ pub(super) struct GenerationMetrics {
     pub(super) checkpoint: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PendingSelfPlay {
-    pub(super) generation: usize,
-    pub(super) training_samples: usize,
-    pub(super) validation_samples: usize,
-    pub(super) elapsed_seconds: f64,
-    pub(super) evaluations: u64,
-    pub(super) unique_games: usize,
-}
-
-pub(super) struct GenerationSelfPlay {
-    pub(super) training: Vec<SelfPlaySample>,
-    pub(super) validation: Vec<SelfPlaySample>,
-    pub(super) pending: PendingSelfPlay,
-    pub(super) recovered: bool,
-}
-
 pub(super) struct RunLock {
     _file: File,
-}
-
-pub(super) fn discard_committed_self_play(
-    output: &Path,
-    generation: usize,
-) -> Result<(), Box<dyn Error>> {
-    let manifest_path = output.join("pending-self-play.toml");
-    if !manifest_path.exists() {
-        return Ok(());
-    }
-    let pending = toml::from_str::<PendingSelfPlay>(&fs::read_to_string(&manifest_path)?)?;
-    if pending.generation <= generation {
-        fs::remove_file(manifest_path)?;
-        let validation_path = validation_replay_path(output, pending.generation);
-        if validation_path.exists() {
-            fs::remove_file(validation_path)?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn recover_self_play(
-    manifest_path: &Path,
-    training_path: &Path,
-    validation_path: &Path,
-    generation: usize,
-) -> Result<Option<GenerationSelfPlay>, Box<dyn Error>> {
-    if !manifest_path.exists() {
-        return Ok(None);
-    }
-    let pending = toml::from_str::<PendingSelfPlay>(&fs::read_to_string(manifest_path)?)?;
-    if pending.generation != generation {
-        return Err("pending self-play generation does not match run state".into());
-    }
-    if !training_path.exists() || !validation_path.exists() {
-        return Err("pending self-play manifest references missing replay data".into());
-    }
-    let training = read_replay(training_path)?;
-    let validation = read_replay(validation_path)?;
-    if pending.training_samples != training.len() || pending.validation_samples != validation.len()
-    {
-        return Err("pending self-play manifest does not match replay data".into());
-    }
-    Ok(Some(GenerationSelfPlay {
-        training,
-        validation,
-        pending,
-        recovered: true,
-    }))
 }
 
 pub(super) fn acquire_run_lock(output: &Path) -> io::Result<RunLock> {
@@ -142,15 +73,12 @@ pub(super) fn acquire_run_lock(output: &Path) -> io::Result<RunLock> {
         .write(true)
         .truncate(false)
         .open(&path)?;
-    FileExt::try_lock_exclusive(&file).map_err(|error| {
-        if error.kind() == io::ErrorKind::WouldBlock {
-            io::Error::new(
-                error.kind(),
-                format!("experiment output is already locked: {}", output.display()),
-            )
-        } else {
-            error
-        }
+    file.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("experiment output is already locked: {}", output.display()),
+        ),
+        TryLockError::Error(error) => error,
     })?;
     Ok(RunLock { _file: file })
 }
@@ -296,9 +224,6 @@ pub(super) fn optimizer_path(output: &Path, generation: usize) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{Game, Outcome};
-    use crate::othello::Board;
-    use crate::othello::replay::{atomic_replay_save, replay_path};
 
     #[test]
     fn run_state_requires_current_explicit_fields() {
@@ -404,53 +329,5 @@ mod tests {
         assert!(!staging.join("partial").exists());
         assert!(!output.exists());
         assert!(staging.join("replay").is_dir());
-    }
-
-    #[test]
-    fn recovery_requires_a_matching_committed_manifest() {
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output");
-        let replay = output.join("replay");
-        fs::create_dir_all(&replay).unwrap();
-        let manifest_path = output.join("pending-self-play.toml");
-        let training_path = replay_path(&output, 1);
-        let validation_path = validation_replay_path(&output, 1);
-        let mut policy = [0.0; Board::ACTION_COUNT];
-        policy[19] = 1.0;
-        let sample = SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Draw,
-            game: 1,
-        };
-        atomic_replay_save(std::slice::from_ref(&sample), &training_path).unwrap();
-
-        assert!(
-            recover_self_play(&manifest_path, &training_path, &validation_path, 1)
-                .unwrap()
-                .is_none()
-        );
-
-        atomic_replay_save(&[], &validation_path).unwrap();
-        atomic_toml_save(
-            &manifest_path,
-            &PendingSelfPlay {
-                generation: 1,
-                training_samples: 1,
-                validation_samples: 0,
-                elapsed_seconds: 1.0,
-                evaluations: 2,
-                unique_games: 1,
-            },
-        )
-        .unwrap();
-        let recovered =
-            recover_self_play(&manifest_path, &training_path, &validation_path, 1).unwrap();
-        assert_eq!(recovered.unwrap().training.len(), 1);
-
-        discard_committed_self_play(&output, 1).unwrap();
-        assert!(!manifest_path.exists());
-        assert!(!validation_path.exists());
-        assert!(training_path.exists());
     }
 }

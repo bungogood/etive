@@ -58,8 +58,6 @@ Use `cargo run -- --help` to display all commands. The main workflows are:
 | `eval` | Compare two checkpoints with fixed-search games |
 | `train` | Start or resume a TOML-configured training run |
 | `bench` | Measure the configured self-play pipeline |
-| `diagnose-replay` | Compare checkpoint predictions with replay targets |
-| `train-frozen` | Run controlled optimization over frozen replay shards |
 | `perft` | Verify opening-position move-generation counts |
 
 ## Engine Protocol
@@ -125,13 +123,6 @@ CUBECL_ENVIRONMENT=etive-bench-v1 RUST_LOG=info cargo run --release --no-default
 The benchmark loads model and actor settings from the experiment TOML and runs
 without training or writing checkpoints.
 
-Controlled regression commands are available for validated replay data:
-
-```bash
-cargo run --release -- diagnose-replay checkpoint.burnpack replay.bin --rows 20000
-cargo run --release -- train-frozen checkpoint.burnpack optimizer.burnpack --replay replay.bin --steps 1000 --output artifacts/frozen-run
-```
-
 Model and optimizer checkpoints use Burn's burnpack format. Checkpoints from
 the former Candle implementation are not compatible and must not be used to
 resume a Burn run.
@@ -160,8 +151,7 @@ cargo test --release published_deep_initial_position_perft -- --ignored --exact
 ## Documentation And Research
 
 - [`experiments/README.md`](experiments/README.md) identifies current and historical run profiles.
-- [`benchmarks/README.md`](benchmarks/README.md) indexes reproducible benchmarks and investigation data.
+- [`benchmarks/README.md`](benchmarks/README.md) indexes retained investigation data.
 - [`docs/README.md`](docs/README.md) distinguishes active plans from historical debugging records.
-- [`notebooks/README.md`](notebooks/README.md) explains the locked metrics-analysis environment.
 
 Etive is licensed under the [MIT License](LICENSE).

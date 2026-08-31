@@ -42,6 +42,20 @@ impl Board {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn square(index: usize) -> Square {
+    Square::from_index(index).unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn position(actions: &[usize]) -> Board {
+    let mut board = Board::default();
+    for &action in actions {
+        board.play(square(action));
+    }
+    board
+}
+
 fn has_won(marks: u16) -> bool {
     for win in WINS {
         if marks & win == win {

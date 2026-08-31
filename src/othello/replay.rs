@@ -125,25 +125,12 @@ pub(super) fn replay_path(output: &Path, generation: usize) -> PathBuf {
         .join(format!("generation-{generation:04}.bin"))
 }
 
-pub(super) fn validation_replay_path(output: &Path, generation: usize) -> PathBuf {
-    output
-        .join("replay")
-        .join(format!("generation-{generation:04}-validation.bin"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample(game: u64) -> SelfPlaySample {
-        let mut policy = [0.0; 65];
-        policy[19] = 1.0;
-        SelfPlaySample {
-            position: Board::default(),
-            policy,
-            outcome: Outcome::Win,
-            game,
-        }
+        sample_for(Board::default(), Outcome::Win, game)
     }
 
     fn sample_for(position: Board, outcome: Outcome, game: u64) -> SelfPlaySample {

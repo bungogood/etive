@@ -34,8 +34,13 @@ use crate::game::{Game, Outcome};
 
 impl Game for Board {
     type Action = Move;
+    type Policy = [f32; 65];
 
     const ACTION_COUNT: usize = Square::COUNT + 1;
+
+    fn zero_policy() -> Self::Policy {
+        [0.0; 65]
+    }
 
     fn side_to_move(&self) -> Color {
         Board::side_to_move(*self)

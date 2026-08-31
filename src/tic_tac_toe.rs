@@ -102,8 +102,13 @@ impl FusedIterator for LegalActions {}
 
 impl Game for Board {
     type Action = Square;
+    type Policy = [f32; 9];
 
     const ACTION_COUNT: usize = Square::COUNT;
+
+    fn zero_policy() -> Self::Policy {
+        [0.0; 9]
+    }
 
     fn side_to_move(&self) -> Color {
         self.side_to_move

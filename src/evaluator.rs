@@ -19,6 +19,17 @@ pub trait BatchEvaluator<G: Game> {
     ) -> Result<(), Self::Error>;
 }
 
+/// Starts model work separately from collecting its packed policy/value output.
+pub trait PipelinedEvaluator<G: Game> {
+    type Error;
+    type Pending;
+
+    fn start_batch(&mut self, games: &[G]) -> Self::Pending;
+
+    /// Returns rows packed as `ACTION_COUNT` policy logits followed by one value.
+    fn finish_batch(&mut self, pending: Self::Pending) -> Result<Vec<f32>, Self::Error>;
+}
+
 /// Reusable contiguous storage for one bounded inference batch.
 pub(crate) struct InferenceBatch<G: Game, T> {
     maximum: usize,

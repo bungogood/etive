@@ -3,7 +3,7 @@ use burn::tensor::{Device, FloatDType, Tensor, TensorData, TensorReadError};
 use std::sync::OnceLock;
 
 use super::{Board, OthelloEncoding, OthelloNetwork};
-use crate::evaluator::BatchEvaluator;
+use crate::evaluator::{BatchEvaluator, PipelinedEvaluator};
 use crate::game::Game;
 
 #[cfg(feature = "cuda")]
@@ -58,7 +58,7 @@ pub struct OthelloBurnEvaluator {
     upload_stream: EvaluationStream,
 }
 
-pub(crate) struct PendingOthelloInference {
+pub struct PendingOthelloInference {
     output: Tensor<2>,
     batch_size: usize,
     stream: EvaluationStream,
@@ -101,7 +101,7 @@ impl OthelloBurnEvaluator {
         self.batches
     }
 
-    pub(crate) fn start_batch(&mut self, games: &[Board]) -> PendingOthelloInference {
+    fn start_batch(&mut self, games: &[Board]) -> PendingOthelloInference {
         assert!(!games.is_empty(), "inference batch must not be empty");
         self.input.resize(games.len() * OthelloEncoding::LEN, 0.0);
         OthelloEncoding::encode_batch(games, &mut self.input);
@@ -129,7 +129,7 @@ impl OthelloBurnEvaluator {
         }
     }
 
-    pub(crate) fn finish_batch(
+    fn finish_batch(
         &mut self,
         pending: PendingOthelloInference,
     ) -> Result<Vec<f32>, TensorReadError> {
@@ -140,6 +140,19 @@ impl OthelloBurnEvaluator {
         self.evaluations += pending.batch_size as u64;
         self.batches += 1;
         Ok(output)
+    }
+}
+
+impl PipelinedEvaluator<Board> for OthelloBurnEvaluator {
+    type Error = TensorReadError;
+    type Pending = PendingOthelloInference;
+
+    fn start_batch(&mut self, games: &[Board]) -> Self::Pending {
+        Self::start_batch(self, games)
+    }
+
+    fn finish_batch(&mut self, pending: Self::Pending) -> Result<Vec<f32>, Self::Error> {
+        Self::finish_batch(self, pending)
     }
 }
 

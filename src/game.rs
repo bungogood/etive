@@ -53,9 +53,13 @@ impl Outcome {
 /// A deterministic, alternating, two-player, zero-sum game.
 pub trait Game: Copy + Send + Sync + 'static {
     type Action: Copy + Eq + Send + Sync;
+    type Policy: Clone + Send + Sync + AsRef<[f32]> + AsMut<[f32]> + 'static;
 
     /// Number of stable policy outputs used by the game.
     const ACTION_COUNT: usize;
+
+    /// Creates zero-filled storage for one policy row.
+    fn zero_policy() -> Self::Policy;
 
     /// Returns the player who will take the next action.
     fn side_to_move(&self) -> Color;

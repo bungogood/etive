@@ -3,12 +3,13 @@ use std::time::{Duration, Instant};
 
 use burn::tensor::Device;
 use clap::{Parser, Subcommand};
+use etive::metrics::write_csv;
 use etive::othello::actors::run as run_actors;
 use etive::othello::evaluation::{EvalConfig, evaluate};
 use etive::othello::experiment;
 use etive::othello::{
-    Board, DiagnosticsReport, FrozenTrainingConfig, FrozenTrainingReport, OthelloBurnEvaluator,
-    OthelloNetwork, diagnose_replay, perft, train_frozen,
+    Board, FrozenTrainingConfig, OthelloBurnEvaluator, OthelloNetwork, diagnose_replay, perft,
+    train_frozen,
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -250,8 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 float32,
                 burn_device(),
             )?;
-            println!("{}", DiagnosticsReport::CSV_HEADER);
-            println!("{report}");
+            write_csv(std::io::stdout().lock(), &report)?;
         }
         Command::TrainFrozen {
             checkpoint,
@@ -278,8 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 burn_device(),
             )?;
-            println!("{}", FrozenTrainingReport::CSV_HEADER);
-            println!("{report}");
+            write_csv(std::io::stdout().lock(), &report)?;
         }
     }
     Ok(())

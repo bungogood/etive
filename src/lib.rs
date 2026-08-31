@@ -4,6 +4,7 @@ pub mod arena;
 pub mod evaluator;
 pub mod game;
 pub mod mcts;
+pub mod metrics;
 pub mod othello;
 pub mod self_play;
 #[cfg(test)]

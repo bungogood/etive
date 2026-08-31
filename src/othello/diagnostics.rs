@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +6,7 @@ use burn::tensor::{Device, FloatDType};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index;
+use serde::Serialize;
 
 use super::Board;
 use super::OthelloBurnEvaluator;
@@ -18,7 +18,7 @@ use crate::game::Game;
 const ACTION_COUNT: usize = Board::ACTION_COUNT;
 
 /// Aggregate checkpoint diagnostics over replay positions.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct DiagnosticsReport {
     pub available_rows: usize,
     pub sampled_rows: usize,
@@ -35,34 +35,6 @@ pub struct DiagnosticsReport {
     pub value_correlation: f64,
     pub value_predicted_mean: f64,
     pub value_predicted_std: f64,
-}
-
-impl DiagnosticsReport {
-    pub const CSV_HEADER: &'static str = "available_rows,sampled_rows,seed,policy_cross_entropy,policy_target_entropy,policy_kl,policy_predicted_entropy,policy_legal_mass,policy_top1_target_agreement,value_mse,value_mae,value_sign_accuracy,value_correlation,value_predicted_mean,value_predicted_std";
-}
-
-impl fmt::Display for DiagnosticsReport {
-    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            output,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            self.available_rows,
-            self.sampled_rows,
-            self.seed,
-            self.policy_cross_entropy,
-            self.policy_target_entropy,
-            self.policy_kl,
-            self.policy_predicted_entropy,
-            self.policy_legal_mass,
-            self.policy_top1_target_agreement,
-            self.value_mse,
-            self.value_mae,
-            self.value_sign_accuracy,
-            self.value_correlation,
-            self.value_predicted_mean,
-            self.value_predicted_std,
-        )
-    }
 }
 
 /// Evaluates a checkpoint against a deterministic sample of validated replay rows.
@@ -404,5 +376,22 @@ mod tests {
         assert_ne!(first, sample_indices(100, 12, 8));
         assert!(first.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(sample_indices(5, 20, 7), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn report_csv_has_typed_header_and_one_row() {
+        let report = Metrics::default().report(1, 1, 7);
+        let mut csv = Vec::new();
+        crate::metrics::write_csv(&mut csv, &report).unwrap();
+        let csv = String::from_utf8(csv).unwrap();
+        let lines = csv.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "available_rows,sampled_rows,seed,policy_cross_entropy,policy_target_entropy,policy_kl,policy_predicted_entropy,policy_legal_mass,policy_top1_target_agreement,value_mse,value_mae,value_sign_accuracy,value_correlation,value_predicted_mean,value_predicted_std"
+        );
+        assert_eq!(lines[0].split(',').count(), 15);
+        assert_eq!(lines[1].split(',').count(), 15);
     }
 }

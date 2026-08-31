@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use burn::tensor::Device;
 use tracing::{info, info_span, warn};
 
+use crate::metrics::PolicyValueMetrics;
+
 use super::OthelloBurnEvaluator;
 use super::OthelloNetwork;
 use super::actors::run as run_actors;
@@ -226,10 +228,10 @@ fn run_loop(
             replay_positions = replay_samples,
             elapsed = %format_args!("{:.1}s", training_report.elapsed.as_secs_f64()),
             learning_rate = %format_args!("{learning_rate:.2e}"),
-            policy_loss = %format_args!("{:.4}", training_report.policy_loss),
-            policy_target_entropy = %format_args!("{:.4}", training_report.policy_target_entropy),
-            policy_kl = %format_args!("{:.4}", training_report.policy_kl()),
-            value_loss = %format_args!("{:.4}", training_report.value_loss),
+            policy_cross_entropy = %format_args!("{:.4}", training_report.metrics.policy_cross_entropy),
+            policy_target_entropy = %format_args!("{:.4}", training_report.metrics.policy_target_entropy),
+            policy_kl = %format_args!("{:.4}", training_report.metrics.policy_kl()),
+            value_mse = %format_args!("{:.4}", training_report.metrics.value_mse),
             "training complete"
         );
 
@@ -283,17 +285,8 @@ fn run_loop(
                 "candidate rejected; learner continues training"
             );
         }
-        let (validation_policy, validation_entropy, validation_kl, validation_value) =
-            validation_loss
-                .map(|loss| {
-                    (
-                        loss.policy_loss,
-                        loss.policy_target_entropy,
-                        loss.policy_kl(),
-                        loss.value_loss,
-                    )
-                })
-                .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
+        let validation_metrics = validation_loss
+            .unwrap_or_else(|| PolicyValueMetrics::new(f32::NAN, f32::NAN, f32::NAN));
         append_metrics(
             &metrics_path,
             &GenerationMetrics {
@@ -311,14 +304,23 @@ fn run_loop(
                 learning_rate: rounded(learning_rate, 8),
                 training_steps,
                 training_seconds: rounded(training_report.elapsed.as_secs_f64(), 3),
-                policy_loss: rounded(f64::from(training_report.policy_loss), 5),
-                policy_target_entropy: rounded(f64::from(training_report.policy_target_entropy), 5),
-                policy_kl: rounded(f64::from(training_report.policy_kl()), 5),
-                value_loss: rounded(f64::from(training_report.value_loss), 5),
-                validation_policy_loss: rounded(f64::from(validation_policy), 5),
-                validation_policy_target_entropy: rounded(f64::from(validation_entropy), 5),
-                validation_policy_kl: rounded(f64::from(validation_kl), 5),
-                validation_value_loss: rounded(f64::from(validation_value), 5),
+                policy_loss: rounded(f64::from(training_report.metrics.policy_cross_entropy), 5),
+                policy_target_entropy: rounded(
+                    f64::from(training_report.metrics.policy_target_entropy),
+                    5,
+                ),
+                policy_kl: rounded(f64::from(training_report.metrics.policy_kl()), 5),
+                value_loss: rounded(f64::from(training_report.metrics.value_mse), 5),
+                validation_policy_loss: rounded(
+                    f64::from(validation_metrics.policy_cross_entropy),
+                    5,
+                ),
+                validation_policy_target_entropy: rounded(
+                    f64::from(validation_metrics.policy_target_entropy),
+                    5,
+                ),
+                validation_policy_kl: rounded(f64::from(validation_metrics.policy_kl()), 5),
+                validation_value_loss: rounded(f64::from(validation_metrics.value_mse), 5),
                 evaluated,
                 candidate_wins,
                 baseline_wins,

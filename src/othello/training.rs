@@ -15,6 +15,7 @@ use tracing::info;
 use super::replay::SelfPlaySample;
 use super::{Board, OthelloEncoding, OthelloNetwork};
 use crate::game::Game;
+use crate::metrics::PolicyValueMetrics;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrainingError {
@@ -26,30 +27,11 @@ pub enum TrainingError {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TrainingReport {
-    pub policy_loss: f32,
-    pub policy_target_entropy: f32,
-    pub value_loss: f32,
+    pub metrics: PolicyValueMetrics<f32>,
     pub elapsed: Duration,
 }
 
-impl TrainingReport {
-    pub fn policy_kl(self) -> f32 {
-        self.policy_loss - self.policy_target_entropy
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct LossReport {
-    pub policy_loss: f32,
-    pub policy_target_entropy: f32,
-    pub value_loss: f32,
-}
-
-impl LossReport {
-    pub fn policy_kl(self) -> f32 {
-        self.policy_loss - self.policy_target_entropy
-    }
-}
+pub type LossReport = PolicyValueMetrics<f32>;
 
 pub struct TrainingSession {
     optimizer: ModuleOptimizer,
@@ -102,11 +84,11 @@ pub fn evaluate_loss(
         policy_entropy_total += target_entropy(&policies, batch.len()) * batch.len() as f32;
         value_total += value_loss.into_scalar::<f32>() * batch.len() as f32;
     }
-    Ok(LossReport {
-        policy_loss: policy_total / samples.len() as f32,
-        policy_target_entropy: policy_entropy_total / samples.len() as f32,
-        value_loss: value_total / samples.len() as f32,
-    })
+    Ok(LossReport::new(
+        policy_total / samples.len() as f32,
+        policy_entropy_total / samples.len() as f32,
+        value_total / samples.len() as f32,
+    ))
 }
 
 impl TrainingSession {
@@ -153,14 +135,14 @@ impl TrainingSession {
         let start = Instant::now();
         let mut last_progress = start;
         let mut last_step = 0;
-        let mut policy_loss_total = 0.0;
+        let mut policy_cross_entropy_total = 0.0;
         let mut policy_entropy_total = 0.0;
-        let mut value_loss_total = 0.0;
+        let mut value_mse_total = 0.0;
         for step in 1..=steps {
-            let losses = self.step(network, replay);
-            policy_loss_total += losses.0;
-            value_loss_total += losses.1;
-            policy_entropy_total += losses.2;
+            let metrics = self.step(network, replay);
+            policy_cross_entropy_total += metrics.policy_cross_entropy;
+            policy_entropy_total += metrics.policy_target_entropy;
+            value_mse_total += metrics.value_mse;
             let interval = last_progress.elapsed();
             if interval >= Duration::from_secs(5) || step == steps {
                 info!(
@@ -170,9 +152,9 @@ impl TrainingSession {
                         "{:.1}",
                         (step - last_step) as f64 / interval.as_secs_f64()
                     ),
-                    policy_loss = %format_args!("{:.4}", losses.0),
-                    policy_kl = %format_args!("{:.4}", losses.0 - losses.2),
-                    value_loss = %format_args!("{:.4}", losses.1),
+                    policy_cross_entropy = %format_args!("{:.4}", metrics.policy_cross_entropy),
+                    policy_kl = %format_args!("{:.4}", metrics.policy_kl()),
+                    value_mse = %format_args!("{:.4}", metrics.value_mse),
                     elapsed = %format_args!("{:.1}s", start.elapsed().as_secs_f64()),
                     "training progress"
                 );
@@ -181,9 +163,11 @@ impl TrainingSession {
             }
         }
         Ok(TrainingReport {
-            policy_loss: policy_loss_total / steps as f32,
-            policy_target_entropy: policy_entropy_total / steps as f32,
-            value_loss: value_loss_total / steps as f32,
+            metrics: PolicyValueMetrics::new(
+                policy_cross_entropy_total / steps as f32,
+                policy_entropy_total / steps as f32,
+                value_mse_total / steps as f32,
+            ),
             elapsed: start.elapsed(),
         })
     }
@@ -205,11 +189,7 @@ impl TrainingSession {
         Ok(())
     }
 
-    fn step(
-        &mut self,
-        network: &mut OthelloNetwork,
-        replay: &[&[SelfPlaySample]],
-    ) -> (f32, f32, f32) {
+    fn step(&mut self, network: &mut OthelloNetwork, replay: &[&[SelfPlaySample]]) -> LossReport {
         let sample_count = replay.iter().map(|samples| samples.len()).sum::<usize>();
         for (batch_index, outcome) in self.outcomes.iter_mut().enumerate() {
             let mut sample_index = self.random.random_range(0..sample_count);
@@ -245,12 +225,12 @@ impl TrainingSession {
             &self.device,
         );
         let target_value = tensor(&self.outcomes, [self.batch_size, 1], &self.device);
-        let (policy_loss, value_loss) =
+        let (policy_cross_entropy, value_mse) =
             self.train_tensor_step(network, input, target_policy, target_value);
-        (
-            policy_loss,
-            value_loss,
+        LossReport::new(
+            policy_cross_entropy,
             target_entropy(&self.policies, self.batch_size),
+            value_mse,
         )
     }
 
@@ -356,8 +336,8 @@ mod tests {
         let mut session = TrainingSession::new(device.clone(), 2, 0.001, 0.0001, 11).unwrap();
         let report = session.train_steps(&mut network, &[&samples], 1).unwrap();
 
-        assert!(report.policy_loss.is_finite());
-        assert!(report.value_loss.is_finite());
+        assert!(report.metrics.policy_cross_entropy.is_finite());
+        assert!(report.metrics.value_mse.is_finite());
         let after = network
             .valid()
             .forward(Tensor::zeros([1, 2, 8, 8], &inference_device))
@@ -376,8 +356,8 @@ mod tests {
         let resumed = session.train_steps(&mut network, &[&samples], 1).unwrap();
         std::fs::remove_file(model_path).unwrap();
         std::fs::remove_file(optimizer_path).unwrap();
-        assert!(resumed.policy_loss.is_finite());
-        assert!(resumed.value_loss.is_finite());
+        assert!(resumed.metrics.policy_cross_entropy.is_finite());
+        assert!(resumed.metrics.value_mse.is_finite());
     }
 
     #[ignore = "explicit preflight gate for production training"]
@@ -410,7 +390,7 @@ mod tests {
             "policy did not approach target distribution: {initial:?} -> {final_loss:?}"
         );
         assert!(
-            final_loss.value_loss < 0.01,
+            final_loss.value_mse < 0.01,
             "value did not overfit: {initial:?} -> {final_loss:?}"
         );
     }
@@ -438,8 +418,8 @@ mod tests {
             .valid()
             .forward(Tensor::zeros([1, 2, 8, 8], &inference_device));
 
-        assert!(report.policy_loss.is_finite());
-        assert!(report.value_loss.is_finite());
+        assert!(report.metrics.policy_cross_entropy.is_finite());
+        assert!(report.metrics.value_mse.is_finite());
         assert!(
             policy
                 .into_data()

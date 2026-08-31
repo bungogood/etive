@@ -1,14 +1,15 @@
 use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use burn::tensor::Device;
+use serde::Serialize;
 
 use super::replay::read_replay;
 use super::training::TrainingSession;
 use super::{OthelloModelConfig, OthelloNetwork};
+use crate::metrics::write_csv;
 
 /// Configuration for a fixed number of training steps over immutable replay shards.
 #[derive(Clone, Debug)]
@@ -22,7 +23,7 @@ pub struct FrozenTrainingConfig {
 }
 
 /// Metrics emitted by a frozen-replay training run.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct FrozenTrainingReport {
     pub steps: usize,
     pub replay_rows: usize,
@@ -35,34 +36,6 @@ pub struct FrozenTrainingReport {
     pub policy_target_entropy: f32,
     pub policy_kl: f32,
     pub value_mse: f32,
-}
-
-impl FrozenTrainingReport {
-    pub const CSV_HEADER: &'static str = "steps,replay_rows,batch_size,seed,learning_rate,weight_decay,training_seconds,policy_cross_entropy,policy_target_entropy,policy_kl,value_mse";
-
-    fn csv(&self) -> String {
-        format!("{}\n{}\n", Self::CSV_HEADER, self)
-    }
-}
-
-impl fmt::Display for FrozenTrainingReport {
-    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            output,
-            "{},{},{},{},{},{},{},{},{},{},{}",
-            self.steps,
-            self.replay_rows,
-            self.batch_size,
-            self.seed,
-            self.learning_rate,
-            self.weight_decay,
-            self.training_seconds,
-            self.policy_cross_entropy,
-            self.policy_target_entropy,
-            self.policy_kl,
-            self.value_mse,
-        )
-    }
 }
 
 /// Restores a model and optimizer, then trains over fixed replay data for an exact step count.
@@ -108,16 +81,16 @@ pub fn train_frozen(
             learning_rate: config.learning_rate,
             weight_decay: config.weight_decay,
             training_seconds: training.elapsed.as_secs_f64(),
-            policy_cross_entropy: training.policy_loss,
-            policy_target_entropy: training.policy_target_entropy,
-            policy_kl: training.policy_kl(),
-            value_mse: training.value_loss,
+            policy_cross_entropy: training.metrics.policy_cross_entropy,
+            policy_target_entropy: training.metrics.policy_target_entropy,
+            policy_kl: training.metrics.policy_kl(),
+            value_mse: training.metrics.value_mse,
         };
 
         network.save(staging.join("model.burnpack"))?;
         trainer.save_optimizer(staging.join("optimizer.burnpack"))?;
         fs::write(staging.join("model.toml"), toml::to_string(&model_config)?)?;
-        fs::write(staging.join("metrics.csv"), report.csv())?;
+        write_csv(fs::File::create(staging.join("metrics.csv"))?, &report)?;
         if config.output.exists() {
             return Err(invalid_input("output already exists"));
         }
@@ -273,12 +246,17 @@ mod tests {
             policy_kl: 0.5,
             value_mse: 0.25,
         };
-        let csv = report.csv();
+        let mut csv = Vec::new();
+        write_csv(&mut csv, &report).unwrap();
+        let csv = String::from_utf8(csv).unwrap();
         let lines = csv.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], FrozenTrainingReport::CSV_HEADER);
-        assert_eq!(lines[1], report.to_string());
+        assert_eq!(
+            lines[0],
+            "steps,replay_rows,batch_size,seed,learning_rate,weight_decay,training_seconds,policy_cross_entropy,policy_target_entropy,policy_kl,value_mse"
+        );
         assert_eq!(lines[0].split(',').count(), 11);
         assert_eq!(lines[1].split(',').count(), 11);
+        assert_eq!(lines[1].split(',').nth(9), Some("0.5"));
     }
 }

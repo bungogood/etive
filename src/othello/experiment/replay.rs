@@ -34,7 +34,7 @@ pub(super) fn load_replay(
     for generation in (1..=generation).rev() {
         let path = replay_path(output, generation);
         if !path.exists() {
-            continue;
+            return Err(format!("missing replay shard: {}", path.display()).into());
         }
         let shard = read_replay(&path)?;
         samples += shard.len();

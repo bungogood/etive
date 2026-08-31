@@ -168,11 +168,14 @@ impl TrainingSession {
                 info!(
                     step,
                     total_steps = steps,
-                    steps_per_second = (step - last_step) as f64 / interval.as_secs_f64(),
-                    policy_loss = losses.0,
-                    policy_kl = losses.0 - losses.2,
-                    value_loss = losses.1,
-                    elapsed = ?start.elapsed(),
+                    steps_per_second = %format_args!(
+                        "{:.1}",
+                        (step - last_step) as f64 / interval.as_secs_f64()
+                    ),
+                    policy_loss = %format_args!("{:.4}", losses.0),
+                    policy_kl = %format_args!("{:.4}", losses.0 - losses.2),
+                    value_loss = %format_args!("{:.4}", losses.1),
+                    elapsed = %format_args!("{:.1}s", start.elapsed().as_secs_f64()),
                     "training progress"
                 );
                 last_progress = Instant::now();

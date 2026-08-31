@@ -145,8 +145,8 @@ RUST_LOG=debug cargo run --release --no-default-features --features cuda -- trai
 Use `--clean` to discard a recognized run and start again. Etive refuses to
 clean an output directory without its run metadata. Relative checkpoint and
 output paths are resolved from the configuration file's directory. A run copies
-its configuration into the output directory; changed configurations are
-archived when a run resumes.
+its configuration into the output directory and requires the same configuration
+when resuming. Use a new output path or `--clean` for a changed experiment.
 
 ## Development
 

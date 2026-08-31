@@ -279,9 +279,12 @@ fn run_inference(
                 evaluations,
                 batches,
                 batch_size = batch.len(),
-                average_batch_size = evaluations as f64 / batches as f64,
-                nps = (evaluations - last_evaluations) as f64 / interval.as_secs_f64(),
-                elapsed = ?start.elapsed(),
+                average_batch_size = %format_args!("{:.1}", evaluations as f64 / batches as f64),
+                evaluations_per_second = %format_args!(
+                    "{:.0}",
+                    (evaluations - last_evaluations) as f64 / interval.as_secs_f64()
+                ),
+                elapsed = %format_args!("{:.1}s", start.elapsed().as_secs_f64()),
                 "self-play inference progress"
             );
             last_progress = Instant::now();

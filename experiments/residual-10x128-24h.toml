@@ -31,4 +31,4 @@ games = 500
 simulations = 256
 opening_plies = 8
 seed = 4242
-# Historical behavior: no promotion gate was configured.
+promotion_los = 0.95

@@ -5,7 +5,7 @@ pub(crate) mod replay;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,6 @@ struct Config {
     hours: f64,
     seed: u64,
     checkpoint: Option<PathBuf>,
-    #[serde(default)]
     model: OthelloModelConfig,
     self_play: SelfPlay,
     train: Train,
@@ -73,7 +72,6 @@ struct Train {
     replay_reuse: usize,
     learning_rate: f64,
     final_learning_rate: f64,
-    #[serde(default = "default_weight_decay")]
     weight_decay: f32,
     validation_game_modulus: u64,
 }
@@ -86,24 +84,56 @@ struct Eval {
     simulations: u32,
     opening_plies: usize,
     seed: u64,
-    #[serde(default)]
-    promotion_threshold: Option<f32>,
-    #[serde(default)]
-    promotion_los: Option<f64>,
+    promotion_los: f64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunState {
     generation: usize,
+    champion_generation: usize,
     elapsed_seconds: f64,
-    #[serde(default)]
-    champion_generation: Option<usize>,
-    #[serde(default)]
-    network_generation: Option<usize>,
 }
 
-const fn default_weight_decay() -> f32 {
-    0.01
+const RUN_MARKER: &str = "etive-run-v1\n";
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationMetrics {
+    generation: usize,
+    samples: usize,
+    training_samples: usize,
+    validation_samples: usize,
+    replay_samples: usize,
+    self_play_seconds: f64,
+    self_play_evaluations: u64,
+    self_play_evaluations_per_second: f64,
+    learning_rate: f64,
+    training_steps: usize,
+    training_seconds: f64,
+    policy_loss: f64,
+    policy_target_entropy: f64,
+    policy_kl: f64,
+    value_loss: f64,
+    validation_policy_loss: f64,
+    validation_policy_target_entropy: f64,
+    validation_policy_kl: f64,
+    validation_value_loss: f64,
+    evaluated: bool,
+    candidate_wins: usize,
+    baseline_wins: usize,
+    draws: usize,
+    pair_0: usize,
+    pair_0_5: usize,
+    pair_1: usize,
+    pair_1_5: usize,
+    pair_2: usize,
+    score: f64,
+    los: f64,
+    promoted: bool,
+    baseline_generation: usize,
+    champion_generation: usize,
+    checkpoint: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -174,8 +204,8 @@ fn start_run(config: Config, source: String, device: Device) -> Result<(), Box<d
     let training_device = device.clone().autodiff();
     let network = match &config.checkpoint {
         Some(path) => {
-            let checkpoint_config =
-                OthelloNetwork::checkpoint_config(path).unwrap_or(OthelloModelConfig::LEGACY);
+            let checkpoint_config = OthelloNetwork::checkpoint_config(path)
+                .ok_or("checkpoint is missing valid model metadata")?;
             if checkpoint_config != config.model {
                 return Err("checkpoint model configuration does not match experiment".into());
             }
@@ -191,17 +221,17 @@ fn start_run(config: Config, source: String, device: Device) -> Result<(), Box<d
         config.seed,
     )?;
     fs::write(staging.join("config.toml"), source)?;
+    fs::write(staging.join(".etive-run"), RUN_MARKER)?;
     fs::write(staging.join("model.toml"), toml::to_string(&config.model)?)?;
-    write_metrics_header(&staging.join("metrics.csv"))?;
+    File::create(staging.join("metrics.csv"))?;
     let checkpoint = checkpoint_path(&staging, 0);
     let optimizer = optimizer_path(&staging, 0);
     atomic_network_save(&network, &checkpoint)?;
     atomic_optimizer_save(&trainer, &optimizer)?;
     let state = RunState {
         generation: 0,
+        champion_generation: 0,
         elapsed_seconds: 0.0,
-        champion_generation: Some(0),
-        network_generation: Some(0),
     };
     atomic_toml_save(&staging.join("state.toml"), &state)?;
     fs::rename(staging, &config.output)?;
@@ -210,27 +240,17 @@ fn start_run(config: Config, source: String, device: Device) -> Result<(), Box<d
 }
 
 fn resume_run(config: Config, source: String, device: Device) -> Result<(), Box<dyn Error>> {
+    verify_run_marker(&config.output)?;
     let stored_config = fs::read_to_string(config.output.join("config.toml"))?;
     let state: RunState = toml::from_str(&fs::read_to_string(config.output.join("state.toml"))?)?;
     if stored_config != source {
-        fs::write(
-            config.output.join(format!(
-                "config-before-resume-generation-{:04}.toml",
-                state.generation
-            )),
-            stored_config,
-        )?;
-        fs::write(config.output.join("config.toml"), &source)?;
-        warn!(
-            generation = state.generation,
-            "configuration changed; archived previous configuration"
-        );
+        return Err("experiment configuration changed; use --clean to start a new run".into());
     }
-    repair_metrics(&config.output.join("metrics.csv"), state.generation)?;
-    let (champion_generation, network_generation) = resume_generations(state)?;
-    let network_path = checkpoint_path(&config.output, network_generation);
-    let stored_model =
-        OthelloNetwork::checkpoint_config(&network_path).unwrap_or(OthelloModelConfig::LEGACY);
+    validate_run_state(state)?;
+    validate_metrics(&config.output.join("metrics.csv"), state.generation)?;
+    let network_path = checkpoint_path(&config.output, state.generation);
+    let stored_model = OthelloNetwork::checkpoint_config(&network_path)
+        .ok_or("stored checkpoint is missing valid model metadata")?;
     if stored_model != config.model {
         return Err("stored model configuration does not match experiment".into());
     }
@@ -243,7 +263,7 @@ fn resume_run(config: Config, source: String, device: Device) -> Result<(), Box<
         config.train.weight_decay,
         config.seed,
     )?;
-    trainer.load_optimizer(optimizer_path(&config.output, network_generation))?;
+    trainer.load_optimizer(optimizer_path(&config.output, state.generation))?;
     let replay = load_replay(
         &config.output,
         state.generation,
@@ -251,10 +271,9 @@ fn resume_run(config: Config, source: String, device: Device) -> Result<(), Box<
     )?;
     info!(
         generation = state.generation,
-        champion_generation,
-        network_generation,
+        champion_generation = state.champion_generation,
         replay_positions = replay.iter().map(Vec::len).sum::<usize>(),
-        elapsed_seconds = state.elapsed_seconds,
+        elapsed = %format_args!("{:.1}s", state.elapsed_seconds),
         "resuming experiment"
     );
     run_loop(config, device, network, trainer, replay, state)
@@ -269,7 +288,7 @@ fn run_loop(
     state: RunState,
 ) -> Result<(), Box<dyn Error>> {
     let mut generation = state.generation;
-    let mut champion_generation = state.champion_generation.unwrap_or(generation);
+    let mut champion_generation = state.champion_generation;
     let prior_elapsed = state.elapsed_seconds;
     let run_start = Instant::now();
     let run_seconds = config.hours * 60.0 * 60.0;
@@ -311,7 +330,7 @@ fn run_loop(
             positions = sample_count,
             unique_games,
             evaluations,
-            elapsed = ?Duration::from_secs_f64(pending.elapsed_seconds),
+            elapsed = %format_args!("{:.1}s", pending.elapsed_seconds),
             "self-play complete"
         );
 
@@ -339,12 +358,12 @@ fn run_loop(
         info!(
             steps = training_steps,
             replay_positions = replay_samples,
-            elapsed = ?training_report.elapsed,
-            learning_rate,
-            policy_loss = training_report.policy_loss,
-            policy_target_entropy = training_report.policy_target_entropy,
-            policy_kl = training_report.policy_kl(),
-            value_loss = training_report.value_loss,
+            elapsed = %format_args!("{:.1}s", training_report.elapsed.as_secs_f64()),
+            learning_rate = %format_args!("{learning_rate:.2e}"),
+            policy_loss = %format_args!("{:.4}", training_report.policy_loss),
+            policy_target_entropy = %format_args!("{:.4}", training_report.policy_target_entropy),
+            policy_kl = %format_args!("{:.4}", training_report.policy_kl()),
+            value_loss = %format_args!("{:.4}", training_report.value_loss),
             "training complete"
         );
 
@@ -352,21 +371,22 @@ fn run_loop(
         let optimizer = optimizer_path(&config.output, generation);
         atomic_network_save(&network, &checkpoint)?;
         atomic_optimizer_save(&trainer, &optimizer)?;
+        let baseline_generation = champion_generation;
         let evaluation =
-            evaluate_generation(&config, &device, &network, generation, champion_generation)?;
+            evaluate_generation(&config, &device, &network, generation, baseline_generation)?;
 
         let evaluated = evaluation.is_some();
         let los = evaluation.map_or(f64::NAN, EvalResult::paired_los);
-        let (current_wins, previous_wins, draws, pair_scores, score) = match evaluation {
+        let (candidate_wins, baseline_wins, draws, pair_scores, score) = match evaluation {
             Some(result) => {
                 let score = result.score();
                 info!(
-                    current_wins = result.candidate_wins,
-                    previous_wins = result.baseline_wins,
+                    candidate_wins = result.candidate_wins,
+                    baseline_wins = result.baseline_wins,
                     draws = result.draws,
                     pair_scores = ?result.pair_scores,
-                    score,
-                    los,
+                    score = %format_args!("{:.1}%", score * 100.0),
+                    los = %format_args!("{:.1}%", los * 100.0),
                     "evaluation complete"
                 );
                 (
@@ -379,15 +399,7 @@ fn run_loop(
             }
             None => (0, 0, 0, [0; 5], f64::NAN),
         };
-        let promoted = evaluated
-            && if let Some(threshold) = config.eval.promotion_los {
-                los >= threshold
-            } else {
-                config
-                    .eval
-                    .promotion_threshold
-                    .is_none_or(|threshold| score >= f64::from(threshold))
-            };
+        let promoted = evaluated && los >= config.eval.promotion_los;
         if !evaluated {
             info!(
                 champion_generation,
@@ -399,7 +411,10 @@ fn run_loop(
         } else {
             warn!(
                 generation,
-                champion_generation, score, los, "candidate rejected; learner continues training"
+                champion_generation,
+                score = %format_args!("{:.1}%", score * 100.0),
+                los = %format_args!("{:.1}%", los * 100.0),
+                "candidate rejected; learner continues training"
             );
         }
         let (validation_policy, validation_entropy, validation_kl, validation_value) =
@@ -415,34 +430,54 @@ fn run_loop(
                 .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
         append_metrics(
             &metrics_path,
-            format!(
-                "{generation},{sample_count},{training_sample_count},{validation_sample_count},{replay_samples},{:.6},{evaluations},{:.3},{learning_rate:.8},{},{:.6},{:.6},{:.6},{:.6},{:.6},{validation_policy:.6},{validation_entropy:.6},{validation_kl:.6},{validation_value:.6},{},{current_wins},{previous_wins},{draws},{},{},{},{},{},{score:.6},{los:.6},{promoted},{champion_generation},{}",
-                pending.elapsed_seconds,
-                evaluations as f64 / pending.elapsed_seconds.max(f64::MIN_POSITIVE),
+            &GenerationMetrics {
+                generation,
+                samples: sample_count,
+                training_samples: training_sample_count,
+                validation_samples: validation_sample_count,
+                replay_samples,
+                self_play_seconds: rounded(pending.elapsed_seconds, 3),
+                self_play_evaluations: evaluations,
+                self_play_evaluations_per_second: rounded(
+                    evaluations as f64 / pending.elapsed_seconds.max(f64::MIN_POSITIVE),
+                    1,
+                ),
+                learning_rate: rounded(learning_rate, 8),
                 training_steps,
-                training_report.elapsed.as_secs_f64(),
-                training_report.policy_loss,
-                training_report.policy_target_entropy,
-                training_report.policy_kl(),
-                training_report.value_loss,
+                training_seconds: rounded(training_report.elapsed.as_secs_f64(), 3),
+                policy_loss: rounded(f64::from(training_report.policy_loss), 5),
+                policy_target_entropy: rounded(f64::from(training_report.policy_target_entropy), 5),
+                policy_kl: rounded(f64::from(training_report.policy_kl()), 5),
+                value_loss: rounded(f64::from(training_report.value_loss), 5),
+                validation_policy_loss: rounded(f64::from(validation_policy), 5),
+                validation_policy_target_entropy: rounded(f64::from(validation_entropy), 5),
+                validation_policy_kl: rounded(f64::from(validation_kl), 5),
+                validation_value_loss: rounded(f64::from(validation_value), 5),
                 evaluated,
-                pair_scores[0],
-                pair_scores[1],
-                pair_scores[2],
-                pair_scores[3],
-                pair_scores[4],
-                checkpoint.display()
-            ),
+                candidate_wins,
+                baseline_wins,
+                draws,
+                pair_0: pair_scores[0],
+                pair_0_5: pair_scores[1],
+                pair_1: pair_scores[2],
+                pair_1_5: pair_scores[3],
+                pair_2: pair_scores[4],
+                score: rounded(score, 5),
+                los: rounded(los, 5),
+                promoted,
+                baseline_generation,
+                champion_generation,
+                checkpoint,
+            },
         )?;
         atomic_toml_save(
             &state_path,
             &RunState {
                 generation,
+                champion_generation,
                 elapsed_seconds: prior_elapsed
                     + recovered_elapsed
                     + run_start.elapsed().as_secs_f64(),
-                champion_generation: Some(champion_generation),
-                network_generation: Some(generation),
             },
         )?;
         let pending_path = config.output.join("pending-self-play.toml");
@@ -457,7 +492,8 @@ fn run_loop(
     }
     info!(
         generation,
-        elapsed = ?Duration::from_secs_f64(
+        elapsed = %format_args!(
+            "{:.1}s",
             prior_elapsed + recovered_elapsed + run_start.elapsed().as_secs_f64()
         ),
         "experiment complete"
@@ -497,10 +533,8 @@ fn generate_or_recover_self_play(
             .self_play
             .actor_config(config.seed.wrapping_add(generation as u64)),
     )?;
-    let (validation, training): (Vec<_>, Vec<_>) = self_play
-        .samples
-        .into_iter()
-        .partition(|sample| is_validation_game(sample.game, config.train.validation_game_modulus));
+    let (training, validation) =
+        split_training_validation(self_play.samples, config.train.validation_game_modulus);
     let pending = PendingSelfPlay {
         generation,
         training_samples: training.len(),
@@ -526,6 +560,24 @@ fn is_validation_game(game: u64, modulus: u64) -> bool {
     hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     (hash ^ (hash >> 31)).is_multiple_of(modulus)
+}
+
+fn split_training_validation(
+    samples: Vec<SelfPlaySample>,
+    modulus: u64,
+) -> (Vec<SelfPlaySample>, Vec<SelfPlaySample>) {
+    let (mut validation, mut training): (Vec<_>, Vec<_>) = samples
+        .into_iter()
+        .partition(|sample| is_validation_game(sample.game, modulus));
+    if training.is_empty() && !validation.is_empty() {
+        let training_game = validation[0].game;
+        let (remaining, fallback): (Vec<_>, Vec<_>) = validation
+            .into_iter()
+            .partition(|sample| sample.game != training_game);
+        validation = remaining;
+        training = fallback;
+    }
+    (training, validation)
 }
 
 fn cleanup_device_memory(device: &Device, phase: &'static str) -> Result<(), Box<dyn Error>> {
@@ -579,10 +631,15 @@ fn evaluate_generation(
                     total = progress.total,
                     moves = progress.moves,
                     evaluations = progress.evaluations,
-                    nps = (progress.evaluations - last_evaluations) as f64
-                        / interval.as_secs_f64(),
-                    games_per_second = progress.completed as f64 / start.elapsed().as_secs_f64(),
-                    elapsed = ?start.elapsed(),
+                    evaluations_per_second = %format_args!(
+                        "{:.0}",
+                        (progress.evaluations - last_evaluations) as f64 / interval.as_secs_f64()
+                    ),
+                    games_per_second = %format_args!(
+                        "{:.1}",
+                        progress.completed as f64 / start.elapsed().as_secs_f64()
+                    ),
+                    elapsed = %format_args!("{:.1}s", start.elapsed().as_secs_f64()),
                     "generation evaluation progress"
                 );
                 last_progress = Instant::now();
@@ -654,15 +711,7 @@ fn validate(config: &Config) -> Result<(), Box<dyn Error>> {
         || config.eval.games == 0
         || !config.eval.games.is_multiple_of(2)
         || config.eval.simulations < 2
-        || config.eval.promotion_threshold.is_some() && config.eval.promotion_los.is_some()
-        || config
-            .eval
-            .promotion_threshold
-            .is_some_and(|threshold| !(0.5..=1.0).contains(&threshold))
-        || config
-            .eval
-            .promotion_los
-            .is_some_and(|threshold| !(0.5..1.0).contains(&threshold))
+        || !(0.5..1.0).contains(&config.eval.promotion_los)
         || config.model.validate().is_err()
     {
         return Err("invalid experiment configuration".into());
@@ -724,7 +773,7 @@ fn clean_output(output: &Path) -> Result<(), Box<dyn Error>> {
     if !output.exists() {
         return Ok(());
     }
-    if !output.join("config.toml").is_file() || !output.join("state.toml").is_file() {
+    if verify_run_marker(output).is_err() {
         return Err(format!(
             "refusing to clean unrecognized output directory: {}",
             output.display()
@@ -735,42 +784,55 @@ fn clean_output(output: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn write_metrics_header(path: &Path) -> io::Result<()> {
-    fs::write(
-        path,
-        "generation,samples,training_samples,validation_samples,replay_samples,self_play_seconds,self_play_evaluations,self_play_evaluations_per_second,learning_rate,training_steps,training_seconds,policy_loss,policy_target_entropy,policy_kl,value_loss,validation_policy_loss,validation_policy_target_entropy,validation_policy_kl,validation_value_loss,evaluated,current_wins,previous_wins,draws,pair_0,pair_0_5,pair_1,pair_1_5,pair_2,score,los,promoted,champion_generation,checkpoint\n",
-    )
+fn rounded(value: f64, decimal_places: i32) -> f64 {
+    let scale = 10_f64.powi(decimal_places);
+    (value * scale).round() / scale
 }
 
-fn append_metrics(path: &Path, row: String) -> io::Result<()> {
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    writeln!(file, "{row}")?;
-    file.flush()
+fn append_metrics(path: &Path, metrics: &GenerationMetrics) -> Result<(), Box<dyn Error>> {
+    let file = OpenOptions::new().append(true).open(path)?;
+    let write_header = file.metadata()?.len() == 0;
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(write_header)
+        .from_writer(file);
+    writer.serialize(metrics)?;
+    writer.flush()?;
+    Ok(())
 }
 
-fn repair_metrics(path: &Path, generation: usize) -> io::Result<()> {
-    let contents = fs::read_to_string(path)?;
-    let mut lines = contents.lines();
-    let Some(header) = lines.next() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "metrics header missing",
-        ));
-    };
-    let mut repaired = String::with_capacity(contents.len());
-    repaired.push_str(header);
-    repaired.push('\n');
-    for line in lines {
-        let row_generation = line
-            .split(',')
-            .next()
-            .and_then(|value| value.parse::<usize>().ok());
-        if row_generation.is_some_and(|row| row <= generation) {
-            repaired.push_str(line);
-            repaired.push('\n');
-        }
+fn validate_metrics(path: &Path, generation: usize) -> Result<(), Box<dyn Error>> {
+    if fs::metadata(path)?.len() == 0 {
+        return if generation == 0 {
+            Ok(())
+        } else {
+            Err("metrics are empty for a committed run".into())
+        };
     }
-    fs::write(path, repaired)
+
+    let mut reader = csv::Reader::from_path(path)?;
+    if reader.headers()?.clone() != metrics_headers()? {
+        return Err("metrics schema does not match the current Etive format".into());
+    }
+    let mut rows = 0;
+    for (index, row) in reader.deserialize::<GenerationMetrics>().enumerate() {
+        let row = row?;
+        if row.generation != index + 1 {
+            return Err("metrics generations are not contiguous".into());
+        }
+        rows += 1;
+    }
+    if rows != generation {
+        return Err("metrics do not contain exactly one row per committed generation".into());
+    }
+    Ok(())
+}
+
+fn metrics_headers() -> Result<csv::StringRecord, Box<dyn Error>> {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.serialize(GenerationMetrics::default())?;
+    let bytes = writer.into_inner()?;
+    let mut reader = csv::Reader::from_reader(bytes.as_slice());
+    Ok(reader.headers()?.clone())
 }
 
 fn atomic_network_save(network: &OthelloNetwork, path: &Path) -> Result<(), Box<dyn Error>> {
@@ -800,16 +862,27 @@ fn temporary_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn resume_generations(state: RunState) -> io::Result<(usize, usize)> {
-    let champion = state.champion_generation.unwrap_or(state.generation);
-    let network = state.network_generation.unwrap_or(state.generation);
-    if champion > state.generation || network > state.generation {
+fn verify_run_marker(output: &Path) -> io::Result<()> {
+    if fs::read_to_string(output.join(".etive-run"))? != RUN_MARKER {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "run state references a future generation",
+            "invalid Etive run marker",
         ));
     }
-    Ok((champion, network))
+    Ok(())
+}
+
+fn validate_run_state(state: RunState) -> io::Result<()> {
+    if state.champion_generation > state.generation
+        || !state.elapsed_seconds.is_finite()
+        || state.elapsed_seconds < 0.0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid run state",
+        ));
+    }
+    Ok(())
 }
 
 fn checkpoint_path(output: &Path, generation: usize) -> PathBuf {
@@ -831,6 +904,11 @@ output = "checkpoints/run"
 hours = 24.0
 seed = 7
 
+[model]
+channels = 128
+residual_blocks = 10
+norm_groups = 8
+
 [self_play]
 games = 4096
 simulations = 256
@@ -846,6 +924,7 @@ replay_positions = 4000000
 replay_reuse = 4
 learning_rate = 0.001
 final_learning_rate = 0.0003
+weight_decay = 0.01
 validation_game_modulus = 20
 
 [eval]
@@ -854,7 +933,7 @@ games = 500
 simulations = 256
 opening_plies = 8
 seed = 4242
-promotion_threshold = 0.55
+promotion_los = 0.95
 "#;
 
     #[test]
@@ -869,26 +948,52 @@ promotion_threshold = 0.55
     }
 
     #[test]
-    fn run_state_resolves_legacy_and_explicit_generations() {
-        let legacy: RunState = toml::from_str("generation = 4\nelapsed_seconds = 300.0\n").unwrap();
-        assert_eq!(resume_generations(legacy).unwrap(), (4, 4));
+    fn tracked_experiment_configs_use_the_current_schema() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("experiments");
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "toml") {
+                continue;
+            }
+            let config: Config = toml::from_str(&fs::read_to_string(&path).unwrap())
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert!(validate(&config).is_ok(), "{}", path.display());
+        }
+    }
 
-        let champion_only: RunState =
-            toml::from_str("generation = 4\nelapsed_seconds = 300.0\nchampion_generation = 2\n")
+    #[test]
+    fn run_state_requires_current_explicit_fields() {
+        let state: RunState =
+            toml::from_str("generation = 4\nchampion_generation = 2\nelapsed_seconds = 300.0\n")
                 .unwrap();
-        assert_eq!(resume_generations(champion_only).unwrap(), (2, 4));
+        assert!(validate_run_state(state).is_ok());
 
-        let explicit: RunState = toml::from_str(
-            "generation = 4\nelapsed_seconds = 300.0\nchampion_generation = 2\nnetwork_generation = 3\n",
-        )
-        .unwrap();
-        assert_eq!(resume_generations(explicit).unwrap(), (2, 3));
+        assert!(toml::from_str::<RunState>("generation = 4\nelapsed_seconds = 300.0\n").is_err());
+        assert!(
+            toml::from_str::<RunState>(
+                "generation = 4\nchampion_generation = 2\nnetwork_generation = 4\nelapsed_seconds = 300.0\n"
+            )
+            .is_err()
+        );
 
-        let future: RunState = toml::from_str(
-            "generation = 4\nelapsed_seconds = 300.0\nchampion_generation = 5\nnetwork_generation = 4\n",
-        )
-        .unwrap();
-        assert!(resume_generations(future).is_err());
+        let future: RunState =
+            toml::from_str("generation = 4\nchampion_generation = 5\nelapsed_seconds = 300.0\n")
+                .unwrap();
+        assert!(validate_run_state(future).is_err());
+        assert!(
+            validate_run_state(RunState {
+                elapsed_seconds: f64::NAN,
+                ..state
+            })
+            .is_err()
+        );
+        assert!(
+            validate_run_state(RunState {
+                elapsed_seconds: -1.0,
+                ..state
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -902,6 +1007,50 @@ promotion_threshold = 0.55
     }
 
     #[test]
+    fn validation_split_always_keeps_training_data() {
+        let game = (0..).find(|game| is_validation_game(*game, 2)).unwrap();
+        let mut policy = [0.0; Board::ACTION_COUNT];
+        policy[19] = 1.0;
+        let sample = SelfPlaySample {
+            position: Board::default(),
+            policy,
+            outcome: Outcome::Draw,
+            game,
+        };
+
+        let (training, validation) = split_training_validation(vec![sample], 2);
+
+        assert_eq!(training.len(), 1);
+        assert!(validation.is_empty());
+    }
+
+    #[test]
+    fn metrics_are_typed_and_match_committed_generations() {
+        let path = std::env::temp_dir().join(format!("etive-metrics-{}.csv", std::process::id()));
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+        File::create(&path).unwrap();
+        append_metrics(
+            &path,
+            &GenerationMetrics {
+                generation: 1,
+                checkpoint: "generation-0001.burnpack".into(),
+                ..GenerationMetrics::default()
+            },
+        )
+        .unwrap();
+
+        validate_metrics(&path, 1).unwrap();
+        assert!(validate_metrics(&path, 0).is_err());
+        let header = fs::read_to_string(&path).unwrap();
+        assert!(header.starts_with("generation,samples,training_samples"));
+        assert!(header.contains("candidate_wins,baseline_wins"));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn clean_only_removes_recognized_runs() {
         let output = std::env::temp_dir().join(format!("etive-clean-{}", std::process::id()));
         if output.exists() {
@@ -912,10 +1061,10 @@ promotion_threshold = 0.55
         assert!(clean_output(&output).is_err());
         assert!(output.exists());
 
-        fs::write(output.join("config.toml"), CONFIG).unwrap();
+        fs::write(output.join(".etive-run"), RUN_MARKER).unwrap();
         fs::write(
             output.join("state.toml"),
-            "generation = 0\nelapsed_seconds = 0.0\n",
+            "generation = 0\nchampion_generation = 0\nelapsed_seconds = 0.0\n",
         )
         .unwrap();
         clean_output(&output).unwrap();

@@ -31,4 +31,4 @@ games = 2
 simulations = 16
 opening_plies = 4
 seed = 4242
-promotion_threshold = 0.55
+promotion_los = 0.5

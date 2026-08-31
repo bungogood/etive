@@ -15,4 +15,5 @@ written beneath the ignored `checkpoints/` directory.
 
 Run `cargo run --release -- train <config>` to resume an existing recognized
 run. Add `--clean` only when intentionally discarding that configuration's
-checkpoint directory.
+checkpoint directory. Run configuration is immutable after initialization;
+changed experiments require a new output path or `--clean`.

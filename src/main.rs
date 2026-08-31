@@ -174,9 +174,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             completed = progress.completed,
                             total = progress.total,
                             moves = progress.moves,
-                            games_per_second = progress.completed as f64 / elapsed.as_secs_f64(),
-                            evaluations_per_second =
-                                progress.evaluations as f64 / elapsed.as_secs_f64(),
+                            games_per_second = %format_args!(
+                                "{:.1}",
+                                progress.completed as f64 / elapsed.as_secs_f64()
+                            ),
+                            evaluations_per_second = %format_args!(
+                                "{:.0}",
+                                progress.evaluations as f64 / elapsed.as_secs_f64()
+                            ),
                             "evaluation progress"
                         );
                         last_progress = Instant::now();
@@ -184,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             )?;
             println!(
-                "eval: contender {} wins, previous {} wins, {} draws, score {:.3}%, paired LOS {:.3}% in {:.3?}",
+                "eval: contender {} wins, baseline {} wins, {} draws, score {:.1}%, paired LOS {:.1}% in {:.1?}",
                 result.candidate_wins,
                 result.baseline_wins,
                 result.draws,

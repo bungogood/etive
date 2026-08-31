@@ -2,7 +2,7 @@
 
 ## Status
 
-The failed 72-hour candidate run is paused and preserved. The regression is reproducible, the arena evaluator is behaving consistently, and the primary failure has been isolated to initialization-sensitive optimization at the original learning rate.
+This historical investigation was completed on 2026-08-31. The failed 72-hour candidate was preserved remotely, the regression was reproduced, and the primary failure was isolated to initialization-sensitive optimization at the original learning rate. The remote bundle is not published with this repository, so the report is evidentiary rather than independently reproducible.
 
 ## Principal Finding
 
@@ -36,9 +36,9 @@ Across 20,000 frozen replay positions, generations 4, 8, and 12 produced effecti
 
 Raw data:
 
-- `benchmarks/training-regression-arena.csv`
-- `benchmarks/training-regression-diagnostics.csv`
-- `benchmarks/training-regression-artifacts.md`
+- `benchmarks/training-regression/arena.csv`
+- `benchmarks/training-regression/diagnostics.csv`
+- `benchmarks/training-regression/artifacts.md`
 
 ## Corrective Direction
 
@@ -58,4 +58,4 @@ The four-hour preflight uses `experiments/trial-4x64-256-4h.toml`. Its first eva
 | 3 | 0.192 | 0.183 | 0.763 | 0.771 | Not evaluated |
 | 4 | 0.177 | 0.173 | 0.757 | 0.760 | 400-0 against generation 0 |
 
-Generation 4 was promoted and is now the self-play champion. Training and validation losses track closely, policy KL declines steadily, and value loss is materially below the approximately 1.0 constant-prediction baseline.
+Generation 4 was the first promoted self-play champion. The completed preflight reached generation 68 with champion generation 48. Training and validation losses tracked closely, policy KL declined steadily, and value loss remained materially below the approximately 1.0 constant-prediction baseline. The complete series is stored in `corrected-4x64-256-4h.csv`.

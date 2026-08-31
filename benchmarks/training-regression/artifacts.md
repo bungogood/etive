@@ -1,5 +1,8 @@
 # Training Regression Artifacts
 
+> Historical provenance. The paths below identify the original remote machine;
+> the 781 MB artifact bundle is not distributed with this repository.
+
 ## Run
 
 - Remote output: `/home/jonathan/projects/etive-rootcause-selector/checkpoints/weekend-4x64-256`
@@ -39,4 +42,4 @@ and `Cargo.lock` intentionally differ because the remote mirror uses its local C
 | 8 | `eaa53b0405e6f32cd1774c065db5a786d59fbe24abddd55b29af335f797f1c83` | `90dfb32459f55187f4914999fb7c2bff5ee079ef474a82b000ae05d4fe83f866` |
 | 12 | `f7427edf7a48a8f595790aa4997c21d7eb8cd5f1c6cdf3d260bbec7f470a687a` | `3b5cf6d381573323b7a2709daaf950d803802688b6a199aa1e7e5585b31b1e8b` |
 
-Arena source data is stored in `benchmarks/training-regression-arena.csv`.
+Arena source data is stored in `arena.csv`.

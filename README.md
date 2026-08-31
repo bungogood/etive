@@ -1,14 +1,12 @@
 # Etive
 
-Etive is an AlphaZero-style game-learning project written in Rust with
-[Burn](https://github.com/tracel-ai/burn) and CubeCL as its tensor backend. The
-current foundation includes a tested, allocation-free Othello rules engine,
-tic-tac-toe with an exact minimax oracle, and direct-to-batch neural state
-encoding. Synchronous PUCT search uses contiguous node and edge arenas with
-subtree reuse and automatic compaction after each played move.
-
-The project is intentionally kept in one crate while its game, search, and
-inference boundaries are established through working code.
+Etive is an AlphaZero-style Othello learning project written in Rust with
+[Burn](https://github.com/tracel-ai/burn) and CubeCL. It includes a tested,
+allocation-free rules engine, direct-to-batch neural state encoding, residual
+policy/value networks, and leaf-parallel PUCT search. Search uses contiguous
+node and edge arenas, batched inference, subtree reuse, and automatic
+compaction after each played move. A tic-tac-toe minimax oracle is retained as
+a test fixture for the generic search implementation.
 
 ## Othello Rules
 
@@ -52,7 +50,17 @@ NVIDIA development libraries.
 
 CUDA inference uses FP16 and training uses FP32 with CubeCL kernel autotuning.
 
-Use `cargo run -- --help` to display the available commands.
+Use `cargo run -- --help` to display all commands. The main workflows are:
+
+| Command | Purpose |
+| --- | --- |
+| `gtp` | Run an Othello engine over Go Text Protocol v2 |
+| `eval` | Compare two checkpoints with fixed-search games |
+| `train` | Start or resume a TOML-configured training run |
+| `bench` | Measure the configured self-play pipeline |
+| `diagnose-replay` | Compare checkpoint predictions with replay targets |
+| `train-frozen` | Run controlled optimization over frozen replay shards |
+| `perft` | Verify opening-position move-generation counts |
 
 ## Engine Protocol
 
@@ -80,15 +88,16 @@ cargo run --release --no-default-features --features cuda -- eval previous.burnp
 
 ## Training
 
-Training runs are defined entirely by TOML files. The included configuration
-starts a fresh 24-hour residual-network experiment:
+Training runs are defined entirely by TOML files. Start with the smoke profile
+when validating a new environment:
 
 ```bash
-cargo run --release --no-default-features --features cuda -- train experiments/residual-10x128-24h.toml
+cargo run --release --no-default-features --features cuda -- train experiments/smoke.toml --clean
 ```
 
-The weekend configuration uses a 4-block, 64-channel network, 4,096 concurrent
-self-play games, 256 simulations per move, and champion gating:
+The current weekend candidate uses a 4-block, 64-channel network, 4,096
+self-play games per generation across eight workers, 256 simulations per move,
+and champion gating:
 
 ```bash
 cargo test --release --no-default-features --features cuda othello::training::tests::fixed_batch_overfit_gate -- --ignored --exact
@@ -98,8 +107,8 @@ CUBECL_ENVIRONMENT=etive-weekend-v1 cargo run --release --no-default-features --
 Run the ignored overfit test before starting a new production run. It requires
 the policy head to fit a fixed soft target and the value head to fit a fixed
 outcome. Weekend candidates are evaluated against the current champion on a
-fixed color-paired opening suite; rejected candidates never replace the
-self-play network or optimizer state.
+fixed color-paired opening suite. Rejected candidates do not replace the
+self-play network; the learner and optimizer continue from their latest state.
 
 Every completed generation saves model weights, AdamW state, model architecture,
 replay data, metrics, champion generation, and elapsed run state. The same
@@ -116,6 +125,13 @@ CUBECL_ENVIRONMENT=etive-bench-v1 RUST_LOG=info cargo run --release --no-default
 The benchmark loads model and actor settings from the experiment TOML and runs
 without training or writing checkpoints.
 
+Controlled regression commands are available for validated replay data:
+
+```bash
+cargo run --release -- diagnose-replay checkpoint.burnpack replay.bin --rows 20000
+cargo run --release -- train-frozen checkpoint.burnpack optimizer.burnpack --replay replay.bin --steps 1000 --output artifacts/frozen-run
+```
+
 Model and optimizer checkpoints use Burn's burnpack format. Checkpoints from
 the former Candle implementation are not compatible and must not be used to
 resume a Burn run.
@@ -123,7 +139,7 @@ resume a Burn run.
 Training logs are written to stderr. Set `RUST_LOG` to adjust their verbosity:
 
 ```bash
-RUST_LOG=debug cargo run --release --no-default-features --features cuda -- train experiments/residual-10x128-24h.toml
+RUST_LOG=debug cargo run --release --no-default-features --features cuda -- train experiments/weekend-4x64-256.toml
 ```
 
 Use `--clean` to discard a recognized run and start again. Etive refuses to
@@ -140,5 +156,12 @@ cargo clippy --all-targets -- -D warnings
 cargo test --release
 cargo test --release published_deep_initial_position_perft -- --ignored --exact
 ```
+
+## Documentation And Research
+
+- [`experiments/README.md`](experiments/README.md) identifies current and historical run profiles.
+- [`benchmarks/README.md`](benchmarks/README.md) indexes reproducible benchmarks and investigation data.
+- [`docs/README.md`](docs/README.md) distinguishes active plans from historical debugging records.
+- [`notebooks/README.md`](notebooks/README.md) explains the locked metrics-analysis environment.
 
 Etive is licensed under the [MIT License](LICENSE).

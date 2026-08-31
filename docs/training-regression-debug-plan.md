@@ -1,5 +1,10 @@
 # Training Regression Debug Plan
 
+> Historical investigation record, completed on 2026-08-31. See
+> `benchmarks/training-regression/README.md` for the resulting report and data.
+> The plan below is preserved as executed; unchecked items were not completed
+> and are not current instructions.
+
 ## Objective
 
 Determine why the continuously trained Othello network regressed after generation 4, correct the training system, and establish a repeatable process for producing a strong engine.
@@ -10,14 +15,14 @@ This investigation treats playing strength against fixed checkpoints as the prim
 
 - Configuration: historical deployed version of `experiments/weekend-4x64-256.toml`; the current file writes corrected runs to a new output directory
 - Remote output: `/home/jonathan/projects/etive-rootcause-selector/checkpoints/weekend-4x64-256`
-- Current run state: paused after generation 12, with no pending self-play manifest
+- Preserved state at investigation start: paused after generation 12, with no pending self-play manifest
 - Model: 4 residual blocks, 64 channels, 8 normalization groups
 - Self-play: 4,096 games per generation, 256 simulations per move
 - Training: batch size 128, replay reuse 4, replay capacity 4,000,000 positions
 - Evaluation: 400 paired games every four generations
 - Known-good checkpoint: generation 4
 
-Do not resume or clean this output directory until the investigation is complete.
+During the investigation, this output directory was not resumed or cleaned.
 
 ## Current Evidence
 

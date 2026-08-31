@@ -1,5 +1,8 @@
 # CubeK Convolution Performance Plan
 
+> Active research plan. Machine and checkout observations are dated historical
+> evidence, not a description of a reproducible repository state.
+
 Status: benchmark and generic selector optimization implemented; upstream preparation pending
 
 ## Decision

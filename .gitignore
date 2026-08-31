@@ -9,5 +9,7 @@
 /profiles/
 
 # Python-generated files.
+.venv/
+.ipynb_checkpoints/
 __pycache__/
 *.py[cod]

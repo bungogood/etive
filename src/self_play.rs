@@ -104,10 +104,6 @@ struct PendingSample<G: Game> {
     player: Color,
 }
 
-struct WorkerResult<G: Game> {
-    samples: Vec<Sample<G>>,
-}
-
 struct InferenceRun {
     evaluations: u64,
     batches: u64,
@@ -191,7 +187,7 @@ where
     let mut samples = Vec::new();
     for worker in workers {
         match worker.join() {
-            Ok(Ok(result)) => samples.extend(result.samples),
+            Ok(Ok(worker_samples)) => samples.extend(worker_samples),
             Ok(Err(error)) => {
                 worker_error.get_or_insert(error);
             }
@@ -406,7 +402,7 @@ fn run_worker<G, E>(
     config: WorkerConfig,
     requests: SyncSender<InferenceRequest<G>>,
     responses: Receiver<InferenceResponse<G>>,
-) -> Result<WorkerResult<G>, Error<E>>
+) -> Result<Vec<Sample<G>>, Error<E>>
 where
     G: Game + Default,
     E: StdError + 'static,
@@ -527,7 +523,7 @@ where
             game: game.trajectory_hash,
         }));
     }
-    Ok(WorkerResult { samples })
+    Ok(samples)
 }
 
 fn root_policy<G: Game>(tree: &Mcts<G>) -> Result<G::Policy, MctsError> {

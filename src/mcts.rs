@@ -409,23 +409,6 @@ impl<G: Game> Mcts<G> {
 
     fn select_edge(&self, node_index: usize, range: Range<usize>) -> usize {
         let node = &self.nodes[node_index];
-        if node.reservations == 0 {
-            let parent_scale = (node.visits.max(1) as f32).sqrt();
-            let mut selected = range.start;
-            let mut selected_score = f32::NEG_INFINITY;
-            for edge_index in range {
-                let edge = &self.edges[edge_index];
-                let exploration =
-                    EXPLORATION * edge.prior * parent_scale / (1 + edge.visits) as f32;
-                let score = edge.mean_value() + exploration;
-                if score > selected_score {
-                    selected = edge_index;
-                    selected_score = score;
-                }
-            }
-            return selected;
-        }
-
         let parent_scale = ((node.visits + node.reservations).max(1) as f32).sqrt();
         let mut selected = range.start;
         let mut selected_score = f32::NEG_INFINITY;

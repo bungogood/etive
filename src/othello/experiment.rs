@@ -348,14 +348,7 @@ fn run_loop(
                     + run_start.elapsed().as_secs_f64(),
             },
         )?;
-        let pending_path = config.output.join("pending-self-play.toml");
-        if pending_path.exists() {
-            fs::remove_file(pending_path)?;
-        }
-        let validation_path = validation_replay_path(&config.output, generation);
-        if validation_path.exists() {
-            fs::remove_file(validation_path)?;
-        }
+        discard_committed_self_play(&config.output, generation)?;
         cleanup_device_memory(&device, "generation")?;
     }
     info!(

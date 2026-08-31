@@ -1,34 +1,14 @@
 use std::fmt;
 use std::iter::FusedIterator;
-use std::ops::Not;
 use std::str::FromStr;
 
-use crate::game::Outcome;
+use crate::game::{Color, Outcome};
 
 use super::movegen;
 use super::{BitBoard, BitBoardIter, Square};
 
 const INITIAL_BLACK: u64 = 0x0000_0008_1000_0000;
 const INITIAL_WHITE: u64 = 0x0000_0010_0800_0000;
-
-#[derive(bincode::Decode, bincode::Encode, Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[repr(u8)]
-pub enum Color {
-    Black,
-    White,
-}
-
-impl Not for Color {
-    type Output = Self;
-
-    #[inline(always)]
-    fn not(self) -> Self::Output {
-        match self {
-            Self::Black => Self::White,
-            Self::White => Self::Black,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Move {

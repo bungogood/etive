@@ -13,9 +13,10 @@ mod replay;
 mod square;
 pub mod training;
 
+pub use crate::game::Color;
 pub use bitboard::{BitBoard, BitBoardIter};
 pub use board::{
-    Board, BoardError, Color, GameStatus, LegalActions, Move, ParseBoardError, ParseMoveError,
+    Board, BoardError, GameStatus, LegalActions, Move, ParseBoardError, ParseMoveError,
 };
 pub use diagnostics::{DiagnosticsReport, diagnose_replay};
 pub use frozen_training::{FrozenTrainingConfig, FrozenTrainingReport, train_frozen};
@@ -28,6 +29,10 @@ impl Game for Board {
     type Action = Move;
 
     const ACTION_COUNT: usize = Square::COUNT + 1;
+
+    fn side_to_move(&self) -> Color {
+        Board::side_to_move(*self)
+    }
 
     fn legal_actions(&self) -> impl ExactSizeIterator<Item = Self::Action> + '_ {
         (*self).legal_actions()

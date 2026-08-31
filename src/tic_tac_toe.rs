@@ -1,6 +1,6 @@
 use std::iter::FusedIterator;
 
-use crate::game::{Game, Outcome};
+use crate::game::{Color, Game, Outcome};
 
 const FULL: u16 = 0x01ff;
 const WINS: [u16; 8] = [0x007, 0x038, 0x1c0, 0x049, 0x092, 0x124, 0x111, 0x054];
@@ -32,6 +32,7 @@ impl Square {
 pub struct Board {
     player: u16,
     opponent: u16,
+    side_to_move: Color,
 }
 
 impl Board {
@@ -52,6 +53,7 @@ impl Board {
         let next_player = self.opponent;
         self.opponent = self.player | square.bit();
         self.player = next_player;
+        self.side_to_move = !self.side_to_move;
     }
 
     fn outcome(self) -> Option<Outcome> {
@@ -102,6 +104,10 @@ impl Game for Board {
     type Action = Square;
 
     const ACTION_COUNT: usize = Square::COUNT;
+
+    fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
 
     fn legal_actions(&self) -> impl ExactSizeIterator<Item = Self::Action> + '_ {
         (*self).legal_actions()

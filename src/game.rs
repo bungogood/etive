@@ -1,5 +1,27 @@
 //! Shared contracts for deterministic two-player games.
 
+use std::ops::Not;
+
+/// The two players in an alternating board game.
+#[derive(bincode::Decode, bincode::Encode, Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum Color {
+    #[default]
+    Black,
+    White,
+}
+
+impl Not for Color {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Self::Black => Self::White,
+            Self::White => Self::Black,
+        }
+    }
+}
+
 /// A terminal result from the perspective of the player to move.
 #[derive(bincode::Decode, bincode::Encode, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Outcome {
@@ -34,6 +56,9 @@ pub trait Game: Copy + Send + Sync + 'static {
 
     /// Number of stable policy outputs used by the game.
     const ACTION_COUNT: usize;
+
+    /// Returns the player who will take the next action.
+    fn side_to_move(&self) -> Color;
 
     /// Iterates over legal actions without allocating.
     fn legal_actions(&self) -> impl ExactSizeIterator<Item = Self::Action> + '_;

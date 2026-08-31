@@ -40,31 +40,6 @@ impl Board {
         assert!(self.legal_actions().any(|legal| legal == square));
         self.play_unchecked(square);
     }
-
-    fn legal_actions(self) -> LegalActions {
-        if self.outcome().is_some() {
-            LegalActions(0)
-        } else {
-            LegalActions(FULL & !(self.player | self.opponent))
-        }
-    }
-
-    fn play_unchecked(&mut self, square: Square) {
-        let next_player = self.opponent;
-        self.opponent = self.player | square.bit();
-        self.player = next_player;
-        self.side_to_move = !self.side_to_move;
-    }
-
-    fn outcome(self) -> Option<Outcome> {
-        if has_won(self.opponent) {
-            Some(Outcome::Loss)
-        } else if self.player | self.opponent == FULL {
-            Some(Outcome::Draw)
-        } else {
-            None
-        }
-    }
 }
 
 fn has_won(marks: u16) -> bool {
@@ -115,7 +90,11 @@ impl Game for Board {
     }
 
     fn legal_actions(&self) -> impl ExactSizeIterator<Item = Self::Action> + '_ {
-        (*self).legal_actions()
+        if self.outcome().is_some() {
+            LegalActions(0)
+        } else {
+            LegalActions(FULL & !(self.player | self.opponent))
+        }
     }
 
     fn action_index(action: Self::Action) -> usize {
@@ -127,11 +106,20 @@ impl Game for Board {
     }
 
     fn play_unchecked(&mut self, action: Self::Action) {
-        Board::play_unchecked(self, action);
+        let next_player = self.opponent;
+        self.opponent = self.player | action.bit();
+        self.player = next_player;
+        self.side_to_move = !self.side_to_move;
     }
 
     fn outcome(&self) -> Option<Outcome> {
-        (*self).outcome()
+        if has_won(self.opponent) {
+            Some(Outcome::Loss)
+        } else if self.player | self.opponent == FULL {
+            Some(Outcome::Draw)
+        } else {
+            None
+        }
     }
 }
 

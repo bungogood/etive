@@ -2,7 +2,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 use std::str::FromStr;
 
-use crate::game::{Color, Outcome};
+use crate::game::{Color, Game, Outcome};
 
 use super::movegen;
 use super::{BitBoard, BitBoardIter, Square};
@@ -139,11 +139,6 @@ impl Board {
     }
 
     #[inline(always)]
-    pub const fn side_to_move(self) -> Color {
-        self.side_to_move
-    }
-
-    #[inline(always)]
     pub const fn discs(self, color: Color) -> BitBoard {
         if color as u8 == self.side_to_move as u8 {
             BitBoard(self.player)
@@ -160,13 +155,6 @@ impl Board {
     #[inline(always)]
     pub fn has_legal_placement(self) -> bool {
         movegen::legal_placements(self.player, self.opponent) != 0
-    }
-
-    pub fn legal_actions(self) -> LegalActions {
-        LegalActions {
-            placements: self.legal_placements().into_iter(),
-            pass: self.is_pass_legal(),
-        }
     }
 
     /// Returns the discs that placing at `square` would flip.
@@ -212,20 +200,11 @@ impl Board {
         }
     }
 
-    pub fn outcome(self) -> Option<Outcome> {
-        match self.status() {
-            GameStatus::Ongoing => None,
-            GameStatus::Drawn => Some(Outcome::Draw),
-            GameStatus::Won(color) if color == self.side_to_move => Some(Outcome::Win),
-            GameStatus::Won(_) => Some(Outcome::Loss),
-        }
-    }
-
     pub fn try_play(&mut self, mv: Move) -> Result<(), BoardError> {
         if !self.is_legal(mv) {
             return Err(BoardError::IllegalMove);
         }
-        self.play_unchecked(mv);
+        Game::play_unchecked(self, mv);
         Ok(())
     }
 
@@ -234,12 +213,61 @@ impl Board {
             .expect("attempted to play an illegal move");
     }
 
+    /// Passes without checking that a pass is currently legal.
+    #[inline(always)]
+    pub fn pass_unchecked(&mut self) {
+        debug_assert!(self.is_pass_legal(), "attempted to play an illegal pass");
+        self.swap_players();
+    }
+
+    #[inline(always)]
+    fn swap_players(&mut self) {
+        std::mem::swap(&mut self.player, &mut self.opponent);
+        self.side_to_move = !self.side_to_move;
+    }
+}
+
+impl Game for Board {
+    type Action = Move;
+    type Policy = [f32; 65];
+
+    const ACTION_COUNT: usize = Square::COUNT + 1;
+
+    fn zero_policy() -> Self::Policy {
+        [0.0; 65]
+    }
+
+    fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
+
+    fn legal_actions(&self) -> impl ExactSizeIterator<Item = Self::Action> + '_ {
+        LegalActions {
+            placements: self.legal_placements().into_iter(),
+            pass: self.is_pass_legal(),
+        }
+    }
+
+    fn action_index(action: Self::Action) -> usize {
+        match action {
+            Move::Place(square) => square.index(),
+            Move::Pass => Square::COUNT,
+        }
+    }
+
+    fn action_from_index(index: usize) -> Option<Self::Action> {
+        match index {
+            0..Square::COUNT => Square::from_index(index).map(Move::Place),
+            Square::COUNT => Some(Move::Pass),
+            _ => None,
+        }
+    }
+
     /// Plays a move without checking that it is legal.
     ///
     /// Invalid input is rejected in debug builds but may corrupt the logical
     /// board state in release builds.
-    #[inline(always)]
-    pub fn play_unchecked(&mut self, mv: Move) {
+    fn play_unchecked(&mut self, mv: Move) {
         debug_assert!(self.is_legal(mv), "attempted to play an illegal move");
         match mv {
             Move::Place(square) => {
@@ -254,17 +282,13 @@ impl Board {
         }
     }
 
-    /// Passes without checking that a pass is currently legal.
-    #[inline(always)]
-    pub fn pass_unchecked(&mut self) {
-        debug_assert!(self.is_pass_legal(), "attempted to play an illegal pass");
-        self.swap_players();
-    }
-
-    #[inline(always)]
-    fn swap_players(&mut self) {
-        std::mem::swap(&mut self.player, &mut self.opponent);
-        self.side_to_move = !self.side_to_move;
+    fn outcome(&self) -> Option<Outcome> {
+        match self.status() {
+            GameStatus::Ongoing => None,
+            GameStatus::Drawn => Some(Outcome::Draw),
+            GameStatus::Won(color) if color == self.side_to_move => Some(Outcome::Win),
+            GameStatus::Won(_) => Some(Outcome::Loss),
+        }
     }
 }
 

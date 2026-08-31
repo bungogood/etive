@@ -7,6 +7,7 @@ use rand::{Rng, SeedableRng};
 
 use super::{Board, Color, OthelloBurnEvaluator};
 use crate::arena::{self, ArenaConfig};
+use crate::game::Game;
 
 pub use crate::arena::{EvalProgress, EvalResult};
 

@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use etive::game::Game;
 use etive::othello::{BitBoard, Board, Color, GameStatus, Move, Square, perft};
 
 fn square(coordinate: &str) -> Square {

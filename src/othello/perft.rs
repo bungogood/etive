@@ -1,4 +1,5 @@
 use super::{Board, GameStatus, Move};
+use crate::game::Game;
 
 pub fn perft(board: &Board, depth: u8) -> u64 {
     if depth == 0 {

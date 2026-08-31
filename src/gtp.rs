@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
 
+use etive::game::Game;
 use etive::mcts::{Mcts, SearchWorkspace};
 use etive::othello::OthelloBurnEvaluator;
 use etive::othello::{Board, Color, GameStatus, Move};

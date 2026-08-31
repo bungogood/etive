@@ -1,6 +1,7 @@
 //! Allocation-free game-state encoding for neural-network batches.
 
 use super::{Board, Square};
+use crate::game::Game;
 
 pub struct OthelloEncoding;
 

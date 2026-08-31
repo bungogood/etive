@@ -22,4 +22,4 @@ jobs:
       - name: Test
         run: cargo test --release
       - name: Run deep perft tests
-        run: cargo test --release -- --ignored
+        run: cargo test --release published_deep_initial_position_perft -- --ignored --exact

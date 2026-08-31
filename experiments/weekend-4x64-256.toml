@@ -1,0 +1,34 @@
+output = "../checkpoints/weekend-4x64-256-fixed"
+hours = 72.0
+seed = 7
+
+[model]
+channels = 64
+residual_blocks = 4
+norm_groups = 8
+
+[self_play]
+games = 4096
+simulations = 256
+workers = 8
+inference_batch_size = 1024
+dirichlet_alpha = 0.15
+dirichlet_fraction = 0.25
+temperature_moves = 16
+
+[train]
+batch_size = 128
+replay_positions = 4000000
+replay_reuse = 4
+learning_rate = 0.0003
+final_learning_rate = 0.00003
+weight_decay = 0.0001
+validation_game_modulus = 10
+
+[eval]
+interval = 4
+games = 400
+simulations = 256
+opening_plies = 8
+seed = 4242
+promotion_threshold = 0.55

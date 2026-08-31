@@ -9,7 +9,6 @@ pub struct Square(u8);
 
 impl Square {
     pub const COUNT: usize = 64;
-    pub const ALL: [Self; Self::COUNT] = all_squares();
 
     #[inline(always)]
     pub const fn new(file: u8, rank: u8) -> Option<Self> {
@@ -53,16 +52,6 @@ impl Square {
     pub const fn bitboard(self) -> BitBoard {
         BitBoard(1_u64 << self.0)
     }
-}
-
-const fn all_squares() -> [Square; Square::COUNT] {
-    let mut squares = [Square(0); Square::COUNT];
-    let mut index = 0;
-    while index < Square::COUNT {
-        squares[index] = Square(index as u8);
-        index += 1;
-    }
-    squares
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

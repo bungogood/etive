@@ -1,5 +1,4 @@
 use std::iter::FusedIterator;
-use std::ops::{BitAnd, BitOr, BitXor, Not, Sub};
 
 use super::Square;
 
@@ -67,38 +66,3 @@ impl Iterator for BitBoardIter {
 
 impl ExactSizeIterator for BitBoardIter {}
 impl FusedIterator for BitBoardIter {}
-
-macro_rules! impl_bit_op {
-    ($trait:ident, $method:ident, $op:tt) => {
-        impl $trait for BitBoard {
-            type Output = Self;
-
-            #[inline(always)]
-            fn $method(self, rhs: Self) -> Self::Output {
-                Self(self.0 $op rhs.0)
-            }
-        }
-    };
-}
-
-impl_bit_op!(BitAnd, bitand, &);
-impl_bit_op!(BitOr, bitor, |);
-impl_bit_op!(BitXor, bitxor, ^);
-
-impl Not for BitBoard {
-    type Output = Self;
-
-    #[inline(always)]
-    fn not(self) -> Self::Output {
-        Self(!self.0)
-    }
-}
-
-impl Sub for BitBoard {
-    type Output = Self;
-
-    #[inline(always)]
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0 & !rhs.0)
-    }
-}

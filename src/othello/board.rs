@@ -173,11 +173,6 @@ impl Board {
     }
 
     #[inline(always)]
-    pub const fn occupied(self) -> BitBoard {
-        BitBoard(self.player | self.opponent)
-    }
-
-    #[inline(always)]
     pub fn legal_placements(self) -> BitBoard {
         BitBoard(movegen::legal_placements(self.player, self.opponent))
     }
@@ -200,7 +195,7 @@ impl Board {
     /// bitboard.
     #[inline(always)]
     pub fn flips(self, square: Square) -> BitBoard {
-        if self.occupied().has(square) {
+        if (self.player | self.opponent) & square.bitboard().0 != 0 {
             return BitBoard::EMPTY;
         }
         BitBoard(movegen::flips(
@@ -270,27 +265,13 @@ impl Board {
             Move::Place(square) => {
                 let placed = square.bitboard().0;
                 let flips = movegen::flips(placed, self.player, self.opponent);
-                self.play_with_flips_unchecked(square, BitBoard(flips));
+                let next_player = self.opponent & !flips;
+                self.opponent = self.player | placed | flips;
+                self.player = next_player;
+                self.side_to_move = !self.side_to_move;
             }
             Move::Pass => self.swap_players(),
         }
-    }
-
-    /// Plays a placement using a previously calculated flip mask.
-    ///
-    /// `square` must be empty and legal in the current position, and `flips`
-    /// must equal the mask returned by [`Board::flips`]. These preconditions are
-    /// checked only in debug builds.
-    #[inline(always)]
-    pub fn play_with_flips_unchecked(&mut self, square: Square, flips: BitBoard) {
-        debug_assert!(!flips.is_empty(), "a legal placement must flip a disc");
-        debug_assert_eq!(self.flips(square), flips, "incorrect flip mask");
-        let placed = square.bitboard().0;
-        let next_player = self.opponent & !flips.0;
-        let next_opponent = self.player | placed | flips.0;
-        self.player = next_player;
-        self.opponent = next_opponent;
-        self.side_to_move = !self.side_to_move;
     }
 
     /// Passes without checking that a pass is currently legal.

@@ -1,11 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::SelfPlaySample;
-use crate::game::Game;
+use crate::game::{Game, Outcome};
 use crate::othello::Board;
 
 const FORMAT_VERSION: u8 = 2;
@@ -51,9 +51,7 @@ pub(super) fn atomic_replay_save(
     samples: &[SelfPlaySample],
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    for sample in samples {
-        validate(sample)?;
-    }
+    validate_samples(samples)?;
     let bytes = bincode::encode_to_vec((FORMAT_VERSION, samples), bincode::config::standard())?;
     let temporary = path.with_extension("bin.tmp");
     fs::write(&temporary, bytes)?;
@@ -61,17 +59,37 @@ pub(super) fn atomic_replay_save(
     Ok(())
 }
 
-pub(super) fn read_replay(path: &Path) -> Result<Vec<SelfPlaySample>, Box<dyn Error>> {
+pub(crate) fn read_replay(path: &Path) -> Result<Vec<SelfPlaySample>, Box<dyn Error>> {
     let bytes = fs::read(path)?;
     let ((version, samples), consumed): ((u8, Vec<SelfPlaySample>), usize) =
         bincode::decode_from_slice(&bytes, bincode::config::standard())?;
     if version != FORMAT_VERSION || consumed != bytes.len() {
         return Err(invalid("unsupported or malformed replay"));
     }
-    for sample in &samples {
-        validate(sample)?;
-    }
+    validate_samples(&samples)?;
     Ok(samples)
+}
+
+fn validate_samples(samples: &[SelfPlaySample]) -> Result<(), Box<dyn Error>> {
+    let mut game_results = HashMap::new();
+    for sample in samples {
+        validate(sample)?;
+        let winner = match sample.outcome {
+            Outcome::Win => Some(sample.position.side_to_move()),
+            Outcome::Draw => None,
+            Outcome::Loss => Some(!sample.position.side_to_move()),
+        };
+        match game_results.entry(sample.game) {
+            Entry::Vacant(entry) => {
+                entry.insert(winner);
+            }
+            Entry::Occupied(entry) if *entry.get() != winner => {
+                return Err(invalid("samples from one game disagree on the outcome"));
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate(sample: &SelfPlaySample) -> Result<(), Box<dyn Error>> {
@@ -114,8 +132,7 @@ pub(super) fn validation_replay_path(output: &Path, generation: usize) -> PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::Outcome;
-    use crate::othello::Board;
+    use crate::othello::Move;
 
     fn sample(game: u64) -> SelfPlaySample {
         let mut policy = [0.0; 65];
@@ -124,6 +141,18 @@ mod tests {
             position: Board::default(),
             policy,
             outcome: Outcome::Win,
+            game,
+        }
+    }
+
+    fn sample_for(position: Board, outcome: Outcome, game: u64) -> SelfPlaySample {
+        let mut policy = [0.0; Board::ACTION_COUNT];
+        let action = position.legal_actions().next().unwrap();
+        policy[Board::action_index(action)] = 1.0;
+        SelfPlaySample {
+            position,
+            policy,
+            outcome,
             game,
         }
     }
@@ -150,6 +179,30 @@ mod tests {
             sample.policy[index] = value;
             assert!(atomic_replay_save(&[sample], &path).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_inconsistent_value_perspectives_within_a_game() {
+        let path = std::env::temp_dir().join(format!(
+            "etive-inconsistent-outcome-{}.bin",
+            std::process::id()
+        ));
+        let black_position = Board::default();
+        let mut white_position = black_position;
+        white_position.play(Move::Place("d3".parse().unwrap()));
+
+        let consistent = [
+            sample_for(black_position, Outcome::Win, 42),
+            sample_for(white_position, Outcome::Loss, 42),
+        ];
+        atomic_replay_save(&consistent, &path).unwrap();
+
+        let inconsistent = [
+            sample_for(black_position, Outcome::Win, 42),
+            sample_for(white_position, Outcome::Win, 42),
+        ];
+        assert!(atomic_replay_save(&inconsistent, &path).is_err());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

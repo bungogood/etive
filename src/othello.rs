@@ -3,6 +3,7 @@
 pub mod actors;
 mod bitboard;
 mod board;
+mod diagnostics;
 pub mod evaluation;
 pub mod experiment;
 mod movegen;
@@ -13,6 +14,9 @@ pub mod training;
 pub use bitboard::{BitBoard, BitBoardIter};
 pub use board::{
     Board, BoardError, Color, GameStatus, LegalActions, Move, ParseBoardError, ParseMoveError,
+};
+pub use diagnostics::{
+    DiagnosticsReport, FrozenTrainingConfig, FrozenTrainingReport, diagnose_replay, train_frozen,
 };
 pub use perft::perft;
 pub use square::{ParseSquareError, Square};

@@ -7,3 +7,7 @@
 /checkpoints/
 /data/
 /profiles/
+
+# Python-generated files.
+__pycache__/
+*.py[cod]

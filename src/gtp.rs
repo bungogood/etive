@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 
-use etive::evaluator::OthelloCandleEvaluator;
-use etive::mcts::{Mcts, MctsConfig, SearchWorkspace};
+use etive::evaluator::OthelloBurnEvaluator;
+use etive::mcts::{Mcts, SearchWorkspace};
 use etive::othello::{Board, Color, GameStatus, Move};
 
 macro_rules! commands {
@@ -44,7 +44,7 @@ pub(crate) fn run(reader: impl BufRead, mut writer: impl Write) -> io::Result<()
 pub(crate) fn run_with_evaluator(
     reader: impl BufRead,
     mut writer: impl Write,
-    evaluator: OthelloCandleEvaluator,
+    evaluator: OthelloBurnEvaluator,
     simulations: u32,
     batch_size: usize,
 ) -> io::Result<()> {
@@ -90,7 +90,7 @@ struct Session {
 }
 
 struct SearchEngine {
-    evaluator: OthelloCandleEvaluator,
+    evaluator: OthelloBurnEvaluator,
     simulations: u32,
     workspace: SearchWorkspace<Board>,
     tree: Option<Mcts<Board>>,
@@ -105,9 +105,7 @@ impl SearchEngine {
         {
             self.tree = None;
         }
-        let tree = self
-            .tree
-            .get_or_insert_with(|| Mcts::new(board, MctsConfig::default()));
+        let tree = self.tree.get_or_insert_with(|| Mcts::new(board));
         self.workspace
             .run_parallel(
                 std::slice::from_mut(tree),
@@ -384,7 +382,7 @@ mod tests {
     use std::io::Cursor;
     use std::str::FromStr;
 
-    use candle_core::Device;
+    use burn::tensor::Device;
 
     use super::*;
     use etive::othello::{BitBoard, Square};
@@ -464,7 +462,7 @@ mod tests {
 
     #[test]
     fn checkpoint_search_generates_a_legal_move() {
-        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let evaluator = OthelloBurnEvaluator::new(Device::flex(), 7);
         let mut session = Session {
             board: Board::default(),
             history: Vec::new(),
@@ -498,7 +496,7 @@ mod tests {
 
     #[test]
     fn checkpoint_search_advances_for_opponent_moves_and_resets_on_undo() {
-        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let evaluator = OthelloBurnEvaluator::new(Device::flex(), 7);
         let mut session = Session {
             board: Board::default(),
             history: Vec::new(),
@@ -542,7 +540,7 @@ mod tests {
 
     #[test]
     fn checkpoint_search_handles_terminal_positions_without_inference() {
-        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let evaluator = OthelloBurnEvaluator::new(Device::flex(), 7);
         let mut session = Session {
             board: Board::from_discs(BitBoard::FULL, BitBoard::EMPTY, Color::White).unwrap(),
             history: Vec::new(),

@@ -1,14 +1,22 @@
 //! Position evaluation independent of any tensor backend.
 
 use std::convert::Infallible;
+#[cfg(feature = "cuda")]
+use std::sync::OnceLock;
 
-use candle_core::{Device, Tensor};
+use burn::tensor::{Device, FloatDType, Tensor, TensorData, TensorReadError};
 
-use crate::encoding::{OthelloEncodingV1, StateEncoder, TicTacToeEncodingV1};
+use crate::encoding::OthelloEncoding;
 use crate::game::Game;
-use crate::model::{OthelloNetwork, TicTacToeNetwork};
+use crate::model::OthelloNetwork;
 use crate::othello;
+#[cfg(test)]
 use crate::tic_tac_toe::{self, minimax};
+
+#[cfg(feature = "cuda")]
+const INFERENCE_DTYPE: FloatDType = FloatDType::F16;
+#[cfg(not(feature = "cuda"))]
+const INFERENCE_DTYPE: FloatDType = FloatDType::F32;
 
 /// Evaluates many independent positions in one model invocation.
 pub trait BatchEvaluator<G: Game> {
@@ -24,7 +32,7 @@ pub trait BatchEvaluator<G: Game> {
 }
 
 /// Reusable contiguous storage for one bounded inference batch.
-pub struct InferenceBatch<G: Game, T> {
+pub(crate) struct InferenceBatch<G: Game, T> {
     maximum: usize,
     tags: Vec<T>,
     positions: Vec<G>,
@@ -33,7 +41,7 @@ pub struct InferenceBatch<G: Game, T> {
 }
 
 impl<G: Game, T> InferenceBatch<G, T> {
-    pub fn new(maximum: usize) -> Self {
+    pub(crate) fn new(maximum: usize) -> Self {
         assert!(maximum > 0, "inference batch size must be positive");
         Self {
             maximum,
@@ -44,37 +52,42 @@ impl<G: Game, T> InferenceBatch<G, T> {
         }
     }
 
-    pub fn push(&mut self, tag: T, position: G) -> bool {
-        if self.is_full() {
-            return false;
-        }
+    pub(crate) fn push(&mut self, tag: T, position: G) {
+        assert!(!self.is_full(), "inference batch is full");
         self.tags.push(tag);
         self.positions.push(position);
-        true
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.tags.clear();
         self.positions.clear();
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.tags.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.tags.is_empty()
     }
 
-    pub fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.tags.len() == self.maximum
     }
 
-    pub fn tags(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
+    pub(crate) const fn capacity(&self) -> usize {
+        self.maximum
+    }
+
+    pub(crate) fn tags(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         self.tags.iter()
     }
 
-    pub fn evaluate_batch<E: BatchEvaluator<G>>(
+    pub(crate) fn positions(&self) -> &[G] {
+        &self.positions
+    }
+
+    pub(crate) fn evaluate_batch<E: BatchEvaluator<G>>(
         &mut self,
         evaluator: &mut E,
     ) -> Result<(), E::Error> {
@@ -84,13 +97,64 @@ impl<G: Game, T> InferenceBatch<G, T> {
         evaluator.evaluate_batch(&self.positions, &mut self.policy_logits, &mut self.values)
     }
 
-    pub fn result(&self, index: usize) -> (&T, &[f32], f32) {
+    pub(crate) fn result(&self, index: usize) -> (&T, &[f32], f32) {
         let start = index * G::ACTION_COUNT;
         (
             &self.tags[index],
             &self.policy_logits[start..start + G::ACTION_COUNT],
             self.values[index],
         )
+    }
+}
+
+impl<T> InferenceBatch<othello::Board, T> {
+    pub(crate) fn pad_positions_to_capacity(&mut self) {
+        let filler = *self
+            .positions
+            .last()
+            .expect("cannot pad an empty inference batch");
+        self.positions.resize(self.maximum, filler);
+    }
+
+    pub(crate) fn set_packed_results(&mut self, output: &[f32]) {
+        self.policy_logits
+            .resize(self.positions.len() * othello::Board::ACTION_COUNT, 0.0);
+        self.values.resize(self.positions.len(), 0.0);
+        unpack_othello_output(output, &mut self.policy_logits, &mut self.values);
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+struct EvaluationStream(cubecl_environment::stream::Stream);
+
+#[cfg(feature = "cuda")]
+impl EvaluationStream {
+    fn shared() -> [Self; 3] {
+        // CubeCL retains each stream's memory pool for the process lifetime.
+        static STREAMS: OnceLock<[cubecl_environment::stream::Stream; 3]> = OnceLock::new();
+        (*STREAMS
+            .get_or_init(|| std::array::from_fn(|_| cubecl_environment::stream::Stream::new())))
+        .map(Self)
+    }
+
+    fn enter<R>(&self, operation: impl FnOnce() -> R) -> R {
+        self.0.enter(operation)
+    }
+}
+
+#[cfg(not(feature = "cuda"))]
+#[derive(Clone, Copy)]
+struct EvaluationStream;
+
+#[cfg(not(feature = "cuda"))]
+impl EvaluationStream {
+    const fn shared() -> [Self; 3] {
+        [Self; 3]
+    }
+
+    fn enter<R>(&self, operation: impl FnOnce() -> R) -> R {
+        operation()
     }
 }
 
@@ -116,9 +180,11 @@ impl<G: Game> BatchEvaluator<G> for UniformEvaluator {
 }
 
 /// Exact tic-tac-toe values with logits biased toward optimal actions.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct TicTacToeMinimaxEvaluator;
+pub(crate) struct TicTacToeMinimaxEvaluator;
 
+#[cfg(test)]
 impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeMinimaxEvaluator {
     type Error = Infallible;
 
@@ -148,93 +214,51 @@ impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeMinimaxEvaluator {
     }
 }
 
-/// Batched Candle evaluation for tic-tac-toe tests.
-pub struct TicTacToeCandleEvaluator {
-    network: TicTacToeNetwork,
-    device: Device,
-    input: Vec<f32>,
-    evaluations: u64,
-    batches: u64,
-}
-
-impl TicTacToeCandleEvaluator {
-    pub fn new(device: Device, seed: u64) -> candle_core::Result<Self> {
-        let network = TicTacToeNetwork::new(&device, seed)?;
-        Ok(Self::from_network(device, network))
-    }
-
-    pub fn from_network(device: Device, network: TicTacToeNetwork) -> Self {
-        Self {
-            network,
-            device,
-            input: vec![0.0; 18],
-            evaluations: 0,
-            batches: 0,
-        }
-    }
-
-    pub const fn evaluations(&self) -> u64 {
-        self.evaluations
-    }
-
-    pub const fn batches(&self) -> u64 {
-        self.batches
-    }
-}
-
-impl BatchEvaluator<tic_tac_toe::Board> for TicTacToeCandleEvaluator {
-    type Error = candle_core::Error;
-
-    fn evaluate_batch(
-        &mut self,
-        games: &[tic_tac_toe::Board],
-        policy_logits: &mut [f32],
-        values: &mut [f32],
-    ) -> Result<(), Self::Error> {
-        assert_eq!(
-            policy_logits.len(),
-            games.len() * tic_tac_toe::Board::ACTION_COUNT
-        );
-        assert_eq!(values.len(), games.len());
-        if games.is_empty() {
-            return Ok(());
-        }
-
-        self.input
-            .resize(games.len() * TicTacToeEncodingV1::encoded_len(), 0.0);
-        TicTacToeEncodingV1.encode_batch(games, &mut self.input);
-        let input = Tensor::from_slice(&self.input, (games.len(), 2, 3, 3), &self.device)?;
-        let (policy, value) = self.network.forward(&input)?;
-        policy_logits.copy_from_slice(&policy.flatten_all()?.to_vec1::<f32>()?);
-        values.copy_from_slice(&value.flatten_all()?.to_vec1::<f32>()?);
-        self.evaluations += games.len() as u64;
-        self.batches += 1;
-        Ok(())
-    }
-}
-
-/// Batched Candle evaluation for Othello search.
-pub struct OthelloCandleEvaluator {
+/// Batched Burn evaluation for Othello search.
+pub struct OthelloBurnEvaluator {
     network: OthelloNetwork,
     device: Device,
+    inference_dtype: FloatDType,
     input: Vec<f32>,
     evaluations: u64,
     batches: u64,
+    compute_streams: [EvaluationStream; 2],
+    next_compute_stream: usize,
+    upload_stream: EvaluationStream,
 }
 
-impl OthelloCandleEvaluator {
-    pub fn new(device: Device, seed: u64) -> candle_core::Result<Self> {
-        let network = OthelloNetwork::new(&device, seed)?;
-        Ok(Self::from_network(device, &network))
+pub(crate) struct PendingOthelloInference {
+    output: Tensor<2>,
+    batch_size: usize,
+    stream: EvaluationStream,
+}
+
+impl OthelloBurnEvaluator {
+    pub fn new(device: Device, seed: u64) -> Self {
+        let network = OthelloNetwork::new(&device, seed);
+        Self::from_network(device, &network)
     }
 
     pub fn from_network(device: Device, network: &OthelloNetwork) -> Self {
+        Self::from_network_with_dtype(device, network, INFERENCE_DTYPE)
+    }
+
+    pub fn from_network_with_dtype(
+        device: Device,
+        network: &OthelloNetwork,
+        dtype: FloatDType,
+    ) -> Self {
+        let [compute_0, compute_1, upload] = EvaluationStream::shared();
         Self {
-            network: network.detached(),
+            network: network.detached().cast_float(dtype),
             device,
-            input: vec![0.0; OthelloEncodingV1::encoded_len()],
+            inference_dtype: dtype,
+            input: vec![0.0; OthelloEncoding::LEN],
             evaluations: 0,
             batches: 0,
+            compute_streams: [compute_0, compute_1],
+            next_compute_stream: 0,
+            upload_stream: upload,
         }
     }
 
@@ -245,10 +269,51 @@ impl OthelloCandleEvaluator {
     pub const fn batches(&self) -> u64 {
         self.batches
     }
+
+    pub(crate) fn start_batch(&mut self, games: &[othello::Board]) -> PendingOthelloInference {
+        assert!(!games.is_empty(), "inference batch must not be empty");
+        self.input.resize(games.len() * OthelloEncoding::LEN, 0.0);
+        OthelloEncoding::encode_batch(games, &mut self.input);
+        let batch_size = games.len();
+        let input = self.upload_stream.enter(|| {
+            let input =
+                Tensor::<1>::from_data(TensorData::from(self.input.as_slice()), &self.device)
+                    .reshape([batch_size, 2, 8, 8])
+                    .cast(self.inference_dtype);
+            self.device.flush();
+            input
+        });
+        let stream = self.compute_streams[self.next_compute_stream];
+        self.next_compute_stream = (self.next_compute_stream + 1) % self.compute_streams.len();
+        let output = stream.enter(|| {
+            let (policy, value) = self.network.forward(input);
+            let output = Tensor::cat(vec![policy, value], 1);
+            self.device.flush();
+            output
+        });
+        PendingOthelloInference {
+            output,
+            batch_size,
+            stream,
+        }
+    }
+
+    pub(crate) fn finish_batch(
+        &mut self,
+        pending: PendingOthelloInference,
+    ) -> Result<Vec<f32>, TensorReadError> {
+        let data = pending
+            .stream
+            .enter(|| burn::tensor::read_sync(pending.output.into_data_async()))?;
+        let output = data.try_into_vec_as::<f32>()?;
+        self.evaluations += pending.batch_size as u64;
+        self.batches += 1;
+        Ok(output)
+    }
 }
 
-impl BatchEvaluator<othello::Board> for OthelloCandleEvaluator {
-    type Error = candle_core::Error;
+impl BatchEvaluator<othello::Board> for OthelloBurnEvaluator {
+    type Error = TensorReadError;
 
     fn evaluate_batch(
         &mut self,
@@ -265,38 +330,61 @@ impl BatchEvaluator<othello::Board> for OthelloCandleEvaluator {
             return Ok(());
         }
 
-        self.input
-            .resize(games.len() * OthelloEncodingV1::encoded_len(), 0.0);
-        OthelloEncodingV1.encode_batch(games, &mut self.input);
-        let input = Tensor::from_slice(&self.input, (games.len(), 2, 8, 8), &self.device)?;
-        let (policy, value) = self.network.forward(&input)?;
-        // One packed readback avoids synchronizing the accelerator separately
-        // for policy and value tensors.
-        let output = Tensor::cat(&[&policy, &value], 1)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let (rows, remainder) = output.as_chunks::<{ othello::Board::ACTION_COUNT + 1 }>();
-        debug_assert!(remainder.is_empty());
-        for (index, row) in rows.iter().enumerate() {
-            let start = index * othello::Board::ACTION_COUNT;
-            policy_logits[start..start + othello::Board::ACTION_COUNT]
-                .copy_from_slice(&row[..othello::Board::ACTION_COUNT]);
-            values[index] = row[othello::Board::ACTION_COUNT];
-        }
-        self.evaluations += games.len() as u64;
-        self.batches += 1;
+        let pending = self.start_batch(games);
+        let output = self.finish_batch(pending)?;
+        unpack_othello_output(&output, policy_logits, values);
         Ok(())
+    }
+}
+
+fn unpack_othello_output(output: &[f32], policy_logits: &mut [f32], values: &mut [f32]) {
+    let width = othello::Board::ACTION_COUNT + 1;
+    assert_eq!(output.len(), values.len() * width);
+    for (index, row) in output.chunks_exact(width).enumerate() {
+        let start = index * othello::Board::ACTION_COUNT;
+        policy_logits[start..start + othello::Board::ACTION_COUNT]
+            .copy_from_slice(&row[..othello::Board::ACTION_COUNT]);
+        values[index] = row[othello::Board::ACTION_COUNT];
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "cuda")]
+    use crate::model::OthelloModelConfig;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_evaluation_streams_are_reused() {
+        let first = EvaluationStream::shared();
+        let second = EvaluationStream::shared();
+
+        assert_eq!(
+            first.map(|stream| stream.0.id()),
+            second.map(|stream| stream.0.id())
+        );
+        assert_ne!(first[0].0.id(), first[1].0.id());
+        assert_ne!(first[0].0.id(), first[2].0.id());
+        assert_ne!(first[1].0.id(), first[2].0.id());
+    }
+
+    #[test]
+    fn inference_batch_padding_preserves_logical_length() {
+        let mut batch = InferenceBatch::new(4);
+        batch.push(7, othello::Board::default());
+
+        batch.pad_positions_to_capacity();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.positions().len(), 4);
+        assert_eq!(batch.tags().copied().collect::<Vec<_>>(), vec![7]);
+    }
 
     #[test]
     fn othello_evaluator_batches_policy_and_value_outputs() {
         let games = [othello::Board::default(); 8];
-        let mut evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let mut evaluator = OthelloBurnEvaluator::new(Device::flex(), 7);
         let mut policies = vec![0.0; games.len() * othello::Board::ACTION_COUNT];
         let mut values = vec![0.0; games.len()];
 
@@ -312,5 +400,63 @@ mod tests {
                 .into_iter()
                 .all(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn othello_cuda_evaluator_large_batch_outputs_are_finite() {
+        let games = [othello::Board::default(); 1024];
+        let device = Device::cuda(0);
+        let network = OthelloNetwork::new(&device, 7);
+        let mut evaluator = OthelloBurnEvaluator::from_network(device, &network);
+        let mut policies = vec![0.0; games.len() * othello::Board::ACTION_COUNT];
+        let mut values = vec![0.0; games.len()];
+
+        evaluator
+            .evaluate_batch(&games, &mut policies, &mut values)
+            .unwrap();
+
+        assert!(policies.into_iter().all(f32::is_finite));
+        assert!(values.into_iter().all(f32::is_finite));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn othello_cuda_evaluator_pipelined_weekend_batches_are_finite() {
+        let games = [othello::Board::default(); 1024];
+        let device = Device::cuda(0);
+        let network = OthelloNetwork::new_with_config(&device, 7, OthelloModelConfig::WEEKEND);
+        let mut evaluator = OthelloBurnEvaluator::from_network(device, &network);
+
+        for iteration in 0..16 {
+            let first = evaluator.start_batch(&games);
+            let second = evaluator.start_batch(&games);
+
+            for (batch, pending) in [("first", first), ("second", second)] {
+                let output = evaluator.finish_batch(pending).unwrap();
+                assert!(
+                    output.iter().all(|value| value.is_finite()),
+                    "{batch} batch in iteration {iteration} contained a non-finite value",
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn othello_cuda_evaluator_serial_weekend_batches_are_finite() {
+        let games = [othello::Board::default(); 1024];
+        let device = Device::cuda(0);
+        let network = OthelloNetwork::new_with_config(&device, 7, OthelloModelConfig::WEEKEND);
+        let mut evaluator = OthelloBurnEvaluator::from_network(device, &network);
+
+        for iteration in 0..16 {
+            let pending = evaluator.start_batch(&games);
+            let output = evaluator.finish_batch(pending).unwrap();
+            assert!(
+                output.iter().all(|value| value.is_finite()),
+                "batch in iteration {iteration} contained a non-finite value",
+            );
+        }
     }
 }

@@ -6,4 +6,5 @@ pub mod game;
 pub mod mcts;
 pub mod model;
 pub mod othello;
+#[cfg(test)]
 pub mod tic_tac_toe;

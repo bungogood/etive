@@ -5,18 +5,14 @@ use super::{EvaluationRequest, Mcts, MctsError, SearchError, Selection};
 
 /// Reusable scheduling and inference storage for batched MCTS calls.
 pub struct SearchWorkspace<G: Game> {
-    maximum: usize,
     completed: Vec<u32>,
-    scheduled: Vec<u32>,
     batch: InferenceBatch<G, (usize, EvaluationRequest)>,
 }
 
 impl<G: Game> SearchWorkspace<G> {
     pub fn new(maximum: usize) -> Self {
         Self {
-            maximum,
             completed: Vec::new(),
-            scheduled: Vec::new(),
             batch: InferenceBatch::new(maximum),
         }
     }
@@ -36,7 +32,7 @@ impl<G: Game> SearchWorkspace<G> {
         evaluator: &mut E,
         simulations: u32,
     ) -> Result<(), SearchError<E::Error>> {
-        self.run(trees, evaluator, simulations, self.maximum)
+        self.run(trees, evaluator, simulations, self.batch.capacity())
     }
 
     fn run<E: BatchEvaluator<G>>(
@@ -51,14 +47,12 @@ impl<G: Game> SearchWorkspace<G> {
         }
         self.completed.resize(trees.len(), 0);
         self.completed.fill(0);
-        self.scheduled.resize(trees.len(), 0);
-
         while self.completed.iter().any(|&count| count < simulations) {
             self.batch.clear();
-            self.scheduled.fill(0);
             for tree_index in 0..trees.len() {
-                while self.completed[tree_index] + self.scheduled[tree_index] < simulations
-                    && (self.scheduled[tree_index] as usize) < max_pending_per_tree
+                while self.completed[tree_index] + (trees[tree_index].pending_count() as u32)
+                    < simulations
+                    && trees[tree_index].pending_count() < max_pending_per_tree
                     && !self.batch.is_full()
                 {
                     let selection = match trees[tree_index].select() {
@@ -73,8 +67,7 @@ impl<G: Game> SearchWorkspace<G> {
                     match selection {
                         Selection::Terminal => self.completed[tree_index] += 1,
                         Selection::Evaluate { request, position } => {
-                            assert!(self.batch.push((tree_index, request), *position));
-                            self.scheduled[tree_index] += 1;
+                            self.batch.push((tree_index, request), *position);
                         }
                         Selection::Blocked => break,
                     }
@@ -112,13 +105,10 @@ impl<G: Game> SearchWorkspace<G> {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::Device;
-
-    use crate::evaluator::{BatchEvaluator, TicTacToeCandleEvaluator, UniformEvaluator};
+    use crate::evaluator::{BatchEvaluator, UniformEvaluator};
     use crate::tic_tac_toe::{Board, Square};
 
     use super::*;
-    use crate::mcts::MctsConfig;
 
     struct RecordingEvaluator {
         batches: Vec<usize>,
@@ -155,7 +145,7 @@ mod tests {
 
     #[test]
     fn one_tree_fills_parallel_batches() {
-        let mut trees = [Mcts::new(Board::default(), MctsConfig::default())];
+        let mut trees = [Mcts::new(Board::default())];
         trees[0].run(&mut UniformEvaluator, 3).unwrap();
         let mut evaluator = RecordingEvaluator {
             batches: Vec::new(),
@@ -176,7 +166,7 @@ mod tests {
     #[test]
     fn errors_cancel_every_pending_request() {
         for (invalid, fail) in [(false, true), (true, false)] {
-            let mut trees = [Mcts::new(Board::default(), MctsConfig::default())];
+            let mut trees = [Mcts::new(Board::default())];
             trees[0].run(&mut UniformEvaluator, 1).unwrap();
             let mut evaluator = RecordingEvaluator {
                 batches: Vec::new(),
@@ -198,9 +188,9 @@ mod tests {
     #[test]
     fn terminal_roots_match_synchronous_search_without_inference() {
         let board = position(&[0, 3, 1, 4, 2]);
-        let mut synchronous = Mcts::new(board, MctsConfig::default());
+        let mut synchronous = Mcts::new(board);
         synchronous.run(&mut UniformEvaluator, 11).unwrap();
-        let mut batched = [Mcts::new(board, MctsConfig::default())];
+        let mut batched = [Mcts::new(board)];
         let mut evaluator = RecordingEvaluator {
             batches: Vec::new(),
             invalid: false,
@@ -219,14 +209,18 @@ mod tests {
     }
 
     #[test]
-    fn batched_candle_search_matches_synchronous_search() {
-        let mut synchronous_evaluator = TicTacToeCandleEvaluator::new(Device::Cpu, 7).unwrap();
-        let mut synchronous = Mcts::new(Board::default(), MctsConfig::default());
+    fn batched_search_matches_synchronous_search() {
+        let mut synchronous_evaluator = UniformEvaluator;
+        let mut synchronous = Mcts::new(Board::default());
         synchronous.run(&mut synchronous_evaluator, 128).unwrap();
 
-        let mut batched_evaluator = TicTacToeCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let mut batched_evaluator = RecordingEvaluator {
+            batches: Vec::new(),
+            invalid: false,
+            fail: false,
+        };
         let mut batched = (0..32)
-            .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
+            .map(|_| Mcts::new(Board::default()))
             .collect::<Vec<_>>();
         SearchWorkspace::new(16)
             .run_batched(&mut batched, &mut batched_evaluator, 128)
@@ -240,6 +234,6 @@ mod tests {
         );
         assert_eq!(batched[0].best_action(), synchronous.best_action());
         assert_eq!(expected.iter().map(|stats| stats.visits).sum::<u32>(), 127);
-        assert!(batched_evaluator.evaluations() <= batched_evaluator.batches() * 16);
+        assert!(batched_evaluator.batches.iter().all(|&size| size <= 16));
     }
 }

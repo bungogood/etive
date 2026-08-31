@@ -59,18 +59,6 @@ fn checked_play_rejects_illegal_moves_without_changing_the_board() {
 }
 
 #[test]
-fn cached_flip_application_matches_normal_play() {
-    let square = square("c4");
-    let mut normal = Board::default();
-    let mut cached = normal;
-    let flips = cached.flips(square);
-
-    normal.play(Move::Place(square));
-    cached.play_with_flips_unchecked(square, flips);
-    assert_eq!(cached, normal);
-}
-
-#[test]
 fn occupied_squares_do_not_produce_flip_masks() {
     let board = Board::default();
     assert!(board.flips(square("d4")).is_empty());

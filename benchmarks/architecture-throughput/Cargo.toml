@@ -1,33 +1,11 @@
 [package]
-name = "etive"
+name = "etive-architecture-throughput"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
-description = "An AlphaZero-style game learning framework built with Burn"
-
-[features]
-default = ["flex"]
-flex = ["burn/flex"]
-cpu = ["burn/cpu"]
-cuda = ["burn/autotune", "burn/cuda", "burn/fusion", "dep:cubecl-environment"]
-metal = ["burn/metal"]
+publish = false
 
 [dependencies]
-bincode = { version = "2.0.1", features = ["derive"] }
-burn = { git = "https://github.com/tracel-ai/burn.git", rev = "5c6f009585fdf3cda7ff37132f2c869d3f4c710f", default-features = false, features = ["std", "optim"] }
-clap = { version = "4.5.46", features = ["derive"] }
-cubecl-environment = { git = "https://github.com/tracel-ai/cubecl.git", rev = "0f1e3ac49f54f84dd5b14a8acd2af3e3a86338b7", optional = true }
-fs2 = "0.4.3"
-rand = "0.9.2"
-rand_distr = "0.5.1"
-serde = { version = "1.0.219", features = ["derive"] }
-thiserror = "2.0.16"
-toml = "0.9.5"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-
-[dev-dependencies]
-burn = { git = "https://github.com/tracel-ai/burn.git", rev = "5c6f009585fdf3cda7ff37132f2c869d3f4c710f", default-features = false, features = ["flex"] }
+burn = { git = "https://github.com/tracel-ai/burn.git", rev = "5c6f009585fdf3cda7ff37132f2c869d3f4c710f", default-features = false, features = ["autotune", "cuda", "fusion", "std"] }
 
 [patch."https://github.com/tracel-ai/cubek"]
 cubek = { git = "https://github.com/bungogood/cubek.git", rev = "2744b9eb499d63b670727d0a1bd3d9694d7f22f7" }
@@ -46,4 +24,3 @@ cubek-tile = { git = "https://github.com/bungogood/cubek.git", rev = "2744b9eb49
 [profile.release]
 codegen-units = 1
 lto = "fat"
-panic = "abort"

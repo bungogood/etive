@@ -1,11 +1,7 @@
 use std::convert::Infallible;
 
 use super::*;
-use candle_core::Device;
-
-use crate::evaluator::{
-    BatchEvaluator, TicTacToeCandleEvaluator, TicTacToeMinimaxEvaluator, UniformEvaluator,
-};
+use crate::evaluator::{BatchEvaluator, TicTacToeMinimaxEvaluator, UniformEvaluator};
 use crate::tic_tac_toe::{Board, Square};
 
 fn square(index: usize) -> Square {
@@ -22,7 +18,7 @@ fn position(actions: &[usize]) -> Board {
 
 #[test]
 fn expansion_appends_one_contiguous_edge_range() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     search.run(&mut UniformEvaluator, 1).unwrap();
 
     assert_eq!(search.node_count(), 1);
@@ -33,7 +29,7 @@ fn expansion_appends_one_contiguous_edge_range() {
 
 #[test]
 fn a_pending_root_blocks_colliding_selection_without_changing_stats() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     let request = match search.select().unwrap() {
         Selection::Evaluate { request, position } => {
             assert_eq!(position, &Board::default());
@@ -65,7 +61,7 @@ fn select_request(search: &mut Mcts<Board>) -> EvaluationRequest {
 
 #[test]
 fn distinct_leaves_can_be_pending_and_completed_out_of_order() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     search.run(&mut UniformEvaluator, 1).unwrap();
 
     let first = select_request(&mut search);
@@ -91,7 +87,7 @@ fn distinct_leaves_can_be_pending_and_completed_out_of_order() {
 
 #[test]
 fn cancelling_one_request_does_not_release_another() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     search.run(&mut UniformEvaluator, 1).unwrap();
     let first = select_request(&mut search);
     let second = select_request(&mut search);
@@ -112,7 +108,7 @@ fn cancelling_one_request_does_not_release_another() {
 
 #[test]
 fn pending_requests_guard_advance_and_root_prior_mixing() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     search.run(&mut UniformEvaluator, 1).unwrap();
     let request = select_request(&mut search);
 
@@ -126,7 +122,7 @@ fn pending_requests_guard_advance_and_root_prior_mixing() {
 #[test]
 fn independent_trees_can_fill_an_inference_batch() {
     let mut trees = (0..32)
-        .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
+        .map(|_| Mcts::new(Board::default()))
         .collect::<Vec<_>>();
     let requests = trees
         .iter_mut()
@@ -146,48 +142,8 @@ fn independent_trees_can_fill_an_inference_batch() {
 }
 
 #[test]
-fn candle_batch_completes_independent_pending_trees() {
-    let mut trees = (0..32)
-        .map(|_| Mcts::new(Board::default(), MctsConfig::default()))
-        .collect::<Vec<_>>();
-    let mut positions = Vec::with_capacity(trees.len());
-    let requests = trees
-        .iter_mut()
-        .map(|tree| match tree.select().unwrap() {
-            Selection::Evaluate { request, position } => {
-                positions.push(*position);
-                request
-            }
-            Selection::Terminal => unreachable!(),
-            Selection::Blocked => unreachable!(),
-        })
-        .collect::<Vec<_>>();
-    let mut evaluator = TicTacToeCandleEvaluator::new(Device::Cpu, 7).unwrap();
-    let mut policies = vec![0.0; positions.len() * Board::ACTION_COUNT];
-    let mut values = vec![0.0; positions.len()];
-
-    evaluator
-        .evaluate_batch(&positions, &mut policies, &mut values)
-        .unwrap();
-    for (index, (tree, request)) in trees.iter_mut().zip(requests).enumerate() {
-        let start = index * Board::ACTION_COUNT;
-        tree.complete(
-            request,
-            &policies[start..start + Board::ACTION_COUNT],
-            values[index],
-        )
-        .unwrap();
-    }
-
-    assert_eq!(evaluator.batches(), 1);
-    assert_eq!(evaluator.evaluations(), 32);
-    assert!(trees.iter().all(|tree| !tree.is_pending()));
-    assert!(trees.iter().all(|tree| tree.edge_count() == 9));
-}
-
-#[test]
 fn stale_completion_does_not_disturb_the_live_request() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     let first = match search.select().unwrap() {
         Selection::Evaluate { request, .. } => request,
         Selection::Terminal => unreachable!(),
@@ -211,8 +167,8 @@ fn stale_completion_does_not_disturb_the_live_request() {
 
 #[test]
 fn requests_are_scoped_to_one_tree() {
-    let mut first = Mcts::new(Board::default(), MctsConfig::default());
-    let mut second = Mcts::new(Board::default(), MctsConfig::default());
+    let mut first = Mcts::new(Board::default());
+    let mut second = Mcts::new(Board::default());
     let first_request = match first.select().unwrap() {
         Selection::Evaluate { request, .. } => request,
         Selection::Terminal => unreachable!(),
@@ -224,7 +180,7 @@ fn requests_are_scoped_to_one_tree() {
         Selection::Blocked => unreachable!(),
     };
 
-    assert_ne!(first_request.tree(), second_request.tree());
+    assert_ne!(first_request, second_request);
     assert!(matches!(
         second.complete(first_request, &[0.0; 9], 0.0),
         Err(MctsError::StaleRequest)
@@ -235,10 +191,10 @@ fn requests_are_scoped_to_one_tree() {
 
 #[test]
 fn split_and_synchronous_search_produce_identical_statistics() {
-    let mut synchronous = Mcts::new(Board::default(), MctsConfig::default());
+    let mut synchronous = Mcts::new(Board::default());
     synchronous.run(&mut UniformEvaluator, 128).unwrap();
 
-    let mut split = Mcts::new(Board::default(), MctsConfig::default());
+    let mut split = Mcts::new(Board::default());
     for _ in 0..128 {
         match split.select().unwrap() {
             Selection::Terminal => {}
@@ -275,7 +231,7 @@ fn evaluator_failure_releases_the_pending_leaf() {
         }
     }
 
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     assert!(matches!(
         search.run(&mut FailingEvaluator, 1),
         Err(SearchError::Evaluator("failed"))
@@ -287,7 +243,7 @@ fn evaluator_failure_releases_the_pending_leaf() {
 #[test]
 fn search_finds_an_immediate_win_and_backs_it_up_positively() {
     let board = position(&[0, 3, 1, 4]);
-    let mut search = Mcts::new(board, MctsConfig::default());
+    let mut search = Mcts::new(board);
     search.run(&mut UniformEvaluator, 128).unwrap();
 
     assert_eq!(search.best_action(), Some(square(2)));
@@ -302,7 +258,7 @@ fn search_finds_an_immediate_win_and_backs_it_up_positively() {
 #[test]
 fn minimax_policy_blocks_a_forced_loss() {
     let board = position(&[0, 4, 1]);
-    let mut search = Mcts::new(board, MctsConfig::default());
+    let mut search = Mcts::new(board);
     search.run(&mut TicTacToeMinimaxEvaluator, 64).unwrap();
 
     assert_eq!(search.best_action(), Some(square(2)));
@@ -333,7 +289,7 @@ fn terminal_nodes_bypass_the_evaluator() {
 
     let board = position(&[0, 3, 1, 4, 2]);
     let mut evaluator = CountingEvaluator { calls: 0 };
-    let mut search = Mcts::new(board, MctsConfig::default());
+    let mut search = Mcts::new(board);
     search.run(&mut evaluator, 8).unwrap();
 
     assert_eq!(evaluator.calls, 0);
@@ -343,24 +299,8 @@ fn terminal_nodes_bypass_the_evaluator() {
 }
 
 #[test]
-fn random_candle_search_backs_up_exact_terminal_values() {
-    let board = position(&[0, 3, 1, 4]);
-    let mut evaluator = TicTacToeCandleEvaluator::new(Device::Cpu, 7).unwrap();
-    let mut search = Mcts::new(board, MctsConfig::default());
-    search.run(&mut evaluator, 256).unwrap();
-
-    let winning = search
-        .root_stats()
-        .find(|stats| stats.action == square(2))
-        .unwrap();
-    assert_eq!(winning.value, 1.0);
-    assert_eq!(search.best_action(), Some(square(2)));
-    assert!(evaluator.evaluations() > 0);
-}
-
-#[test]
 fn advance_retains_the_chosen_subtree_and_reclaims_siblings() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
+    let mut search = Mcts::new(Board::default());
     search.run(&mut TicTacToeMinimaxEvaluator, 256).unwrap();
     let action = search.best_action().unwrap();
     let mut expected = *search.root_position();
@@ -387,19 +327,19 @@ fn advance_retains_the_chosen_subtree_and_reclaims_siblings() {
 }
 
 #[test]
-fn rebasing_clears_root_statistics_but_retains_the_subtree() {
-    let mut search = Mcts::new(Board::default(), MctsConfig::default());
-    search.run(&mut UniformEvaluator, 64).unwrap();
+fn rebase_root_clears_decision_statistics_but_retains_descendants() {
+    let mut search = Mcts::new(Board::default());
+    search.run(&mut TicTacToeMinimaxEvaluator, 256).unwrap();
     let action = search.best_action().unwrap();
     assert!(search.advance(action));
     let nodes = search.node_count();
     let edges = search.edge_count();
-    assert!(search.nodes[search.root].visits > 0);
 
     assert!(search.rebase_root());
 
+    assert_eq!(search.nodes[search.root].visits, 0);
+    assert_eq!(search.nodes[search.root].value_sum, 0.0);
+    assert!(search.root_stats().all(|stats| stats.visits == 0));
     assert_eq!(search.node_count(), nodes);
     assert_eq!(search.edge_count(), edges);
-    assert_eq!(search.root_value(), 0.0);
-    assert!(search.root_stats().all(|stats| stats.visits == 0));
 }

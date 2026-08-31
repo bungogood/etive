@@ -11,17 +11,7 @@ mod workspace;
 pub use workspace::SearchWorkspace;
 
 static NEXT_TREE_ID: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Clone, Copy, Debug)]
-pub struct MctsConfig {
-    pub exploration: f32,
-}
-
-impl Default for MctsConfig {
-    fn default() -> Self {
-        Self { exploration: 1.5 }
-    }
-}
+const EXPLORATION: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ActionStats<A> {
@@ -62,16 +52,6 @@ pub struct EvaluationRequest {
     id: u64,
 }
 
-impl EvaluationRequest {
-    pub const fn tree(self) -> u64 {
-        self.tree
-    }
-
-    pub const fn id(self) -> u64 {
-        self.id
-    }
-}
-
 /// Result of one MCTS selection phase.
 pub enum Selection<'a, G: Game> {
     /// A terminal leaf was backed up immediately without inference.
@@ -92,7 +72,6 @@ struct PendingEvaluation {
 }
 
 pub struct Mcts<G: Game> {
-    config: MctsConfig,
     nodes: Vec<Node<G>>,
     edges: Vec<Edge<G::Action>>,
     root: usize,
@@ -104,10 +83,8 @@ pub struct Mcts<G: Game> {
 }
 
 impl<G: Game> Mcts<G> {
-    pub fn new(position: G, config: MctsConfig) -> Self {
-        assert!(config.exploration.is_finite() && config.exploration >= 0.0);
+    pub fn new(position: G) -> Self {
         Self {
-            config,
             nodes: vec![Node::new(position)],
             edges: Vec::new(),
             root: 0,
@@ -370,11 +347,13 @@ impl<G: Game> Mcts<G> {
         self.root = 0;
     }
 
-    pub fn node_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
-    pub fn edge_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn edge_count(&self) -> usize {
         self.edges.len()
     }
 
@@ -437,7 +416,7 @@ impl<G: Game> Mcts<G> {
             for edge_index in range {
                 let edge = &self.edges[edge_index];
                 let exploration =
-                    self.config.exploration * edge.prior * parent_scale / (1 + edge.visits) as f32;
+                    EXPLORATION * edge.prior * parent_scale / (1 + edge.visits) as f32;
                 let score = edge.mean_value() + exploration;
                 if score > selected_score {
                     selected = edge_index;
@@ -452,7 +431,7 @@ impl<G: Game> Mcts<G> {
         let mut selected_score = f32::NEG_INFINITY;
         for edge_index in range {
             let edge = &self.edges[edge_index];
-            let exploration = self.config.exploration * edge.prior * parent_scale
+            let exploration = EXPLORATION * edge.prior * parent_scale
                 / (1 + edge.visits + edge.reservations) as f32;
             let score = edge.reserved_mean_value() + exploration;
             if score > selected_score {

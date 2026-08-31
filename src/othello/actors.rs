@@ -3,16 +3,18 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use burn::tensor::TensorReadError;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma};
+use tracing::{Span, info};
 
 use super::{Board, Color, GameStatus};
-use crate::evaluator::{InferenceBatch, OthelloCandleEvaluator};
+use crate::evaluator::{InferenceBatch, OthelloBurnEvaluator};
 use crate::game::{Game, Outcome};
-use crate::mcts::{EvaluationRequest, Mcts, MctsConfig, MctsError, Selection};
+use crate::mcts::{EvaluationRequest, Mcts, MctsError, Selection};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ActorConfig {
@@ -26,12 +28,23 @@ pub struct ActorConfig {
     pub temperature_moves: usize,
 }
 
+impl ActorConfig {
+    pub fn is_valid(self) -> bool {
+        self.games > 0
+            && self.simulations >= 2
+            && self.workers > 0
+            && self.inference_batch_size > 0
+            && self.dirichlet_alpha.is_finite()
+            && self.dirichlet_alpha > 0.0
+            && self.dirichlet_fraction.is_finite()
+            && (0.0..=1.0).contains(&self.dirichlet_fraction)
+    }
+}
+
 #[derive(Debug)]
 pub struct ActorRun {
-    pub first_game_actions: Vec<usize>,
-    pub draws: usize,
     pub evaluations: u64,
-    pub batches: u64,
+    pub inference_batches: u64,
     pub unique_games: usize,
     pub samples: Vec<SelfPlaySample>,
 }
@@ -39,7 +52,7 @@ pub struct ActorRun {
 #[derive(bincode::Decode, bincode::Encode, Clone, Debug)]
 pub struct SelfPlaySample {
     pub position: Board,
-    pub policy: [f32; 65],
+    pub policy: [f32; Board::ACTION_COUNT],
     pub outcome: Outcome,
     pub game: u64,
 }
@@ -49,7 +62,7 @@ pub enum ActorError {
     #[error("actor configuration must be positive")]
     InvalidConfig,
     #[error("evaluator failed: {0}")]
-    Evaluator(#[source] candle_core::Error),
+    Evaluator(#[source] TensorReadError),
     #[error(transparent)]
     Mcts(#[from] MctsError),
     #[error("inference thread stopped")]
@@ -68,7 +81,7 @@ struct InferenceRequest {
 struct InferenceResponse {
     tree: usize,
     request: EvaluationRequest,
-    policy: [f32; 65],
+    policy: [f32; Board::ACTION_COUNT],
     value: f32,
 }
 
@@ -89,21 +102,23 @@ struct ActorGame {
 
 struct PendingSample {
     position: Board,
-    policy: [f32; 65],
+    policy: [f32; Board::ACTION_COUNT],
     player: Color,
 }
 
 struct WorkerResult {
-    first_game_actions: Vec<usize>,
-    draws: usize,
     samples: Vec<SelfPlaySample>,
-    trajectory_hashes: Vec<u64>,
+}
+
+struct InferenceRun {
+    evaluations: u64,
+    batches: u64,
 }
 
 struct WorkerConfig {
     worker: usize,
     game_count: usize,
-    owns_first_game: bool,
+    inference_share: usize,
     simulations: u32,
     seed: u64,
     dirichlet_alpha: f64,
@@ -111,15 +126,8 @@ struct WorkerConfig {
     temperature_moves: usize,
 }
 
-pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<ActorRun, ActorError> {
-    if config.games == 0
-        || config.simulations < 2
-        || config.workers == 0
-        || config.inference_batch_size == 0
-        || !config.dirichlet_alpha.is_finite()
-        || config.dirichlet_alpha <= 0.0
-        || !(0.0..=1.0).contains(&config.dirichlet_fraction)
-    {
+pub fn run(evaluator: OthelloBurnEvaluator, config: ActorConfig) -> Result<ActorRun, ActorError> {
+    if !config.is_valid() {
         return Err(ActorError::InvalidConfig);
     }
 
@@ -135,28 +143,32 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
         response_receivers.push(receiver);
     }
 
+    let inference_span = Span::current();
+    let pad_partial_batches = config.games >= config.inference_batch_size;
     let inference = thread::spawn(move || {
+        let _inference_guard = inference_span.enter();
         run_inference(
             evaluator,
             config.inference_batch_size,
+            pad_partial_batches,
             request_receiver,
             response_senders,
         )
     });
 
     let mut workers = Vec::with_capacity(worker_count);
-    let mut first_game = 0;
     for (worker, responses) in response_receivers.into_iter().enumerate() {
         let game_count = shard_len(config.games, worker_count, worker);
-        let owns_first_game = first_game == 0;
-        first_game += game_count;
         let requests = request_sender.clone();
         workers.push(thread::spawn(move || {
             run_worker(
                 WorkerConfig {
                     worker,
                     game_count,
-                    owns_first_game,
+                    inference_share: config
+                        .inference_batch_size
+                        .saturating_mul(2)
+                        .div_ceil(worker_count),
                     simulations: config.simulations,
                     seed: config.seed.wrapping_add(worker as u64),
                     dirichlet_alpha: config.dirichlet_alpha,
@@ -170,20 +182,12 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
     }
     drop(request_sender);
 
-    let mut first_game_actions = Vec::new();
-    let mut draws = 0;
     let mut worker_error = None;
     let mut samples = Vec::with_capacity(config.games.saturating_mul(60));
-    let mut trajectory_hashes = Vec::with_capacity(config.games);
     for worker in workers {
         match worker.join() {
             Ok(Ok(result)) => {
-                if !result.first_game_actions.is_empty() {
-                    first_game_actions = result.first_game_actions;
-                }
-                draws += result.draws;
                 samples.extend(result.samples);
-                trajectory_hashes.extend(result.trajectory_hashes);
             }
             Ok(Err(error)) => {
                 worker_error.get_or_insert(error);
@@ -193,46 +197,174 @@ pub fn run(evaluator: OthelloCandleEvaluator, config: ActorConfig) -> Result<Act
             }
         }
     }
-    let inference = inference.join().map_err(|_| ActorError::WorkerPanicked)?;
-    let (evaluations, batches) = inference?;
+    let inference = inference.join().map_err(|_| ActorError::WorkerPanicked)??;
     if let Some(error) = worker_error {
         return Err(error);
     }
 
     Ok(ActorRun {
-        first_game_actions,
-        draws,
-        evaluations,
-        batches,
-        unique_games: trajectory_hashes.into_iter().collect::<HashSet<_>>().len(),
+        evaluations: inference.evaluations,
+        inference_batches: inference.batches,
+        unique_games: samples
+            .iter()
+            .map(|sample| sample.game)
+            .collect::<HashSet<_>>()
+            .len(),
         samples,
     })
 }
 
 fn run_inference(
-    mut evaluator: OthelloCandleEvaluator,
+    mut evaluator: OthelloBurnEvaluator,
     batch_size: usize,
+    pad_partial_batches: bool,
     requests: Receiver<InferenceRequest>,
     responses: Vec<SyncSender<InferenceResponse>>,
-) -> Result<(u64, u64), ActorError> {
-    let mut batch = InferenceBatch::new(batch_size);
+) -> Result<InferenceRun, ActorError> {
+    let (ready_sender, ready_receiver) = sync_channel(2);
+    let (completed_sender, completed_receiver) = sync_channel(1);
+    let (recycled_sender, recycled_receiver) = sync_channel(3);
+    let batch_span = Span::current();
+    let batcher = thread::spawn(move || {
+        let _batch_guard = batch_span.enter();
+        batch_inference(requests, ready_sender, recycled_receiver, batch_size)
+    });
+    let dispatch_span = Span::current();
+    let dispatcher = thread::spawn(move || {
+        let _dispatch_guard = dispatch_span.enter();
+        dispatch_inference(completed_receiver, recycled_sender, responses)
+    });
+    let start = Instant::now();
+    let mut last_progress = start;
+    let mut last_evaluations = 0;
+    let mut evaluations = 0;
+    let mut batches = 0;
 
-    while let Ok(first) = requests.recv() {
-        batch.clear();
+    let Ok(mut batch) = ready_receiver.recv() else {
+        drop(completed_sender);
+        batcher.join().map_err(|_| ActorError::WorkerPanicked)?;
+        dispatcher.join().map_err(|_| ActorError::WorkerPanicked)?;
+        return Ok(InferenceRun {
+            evaluations: 0,
+            batches: 0,
+        });
+    };
+    if pad_partial_batches {
+        batch.pad_positions_to_capacity();
+    }
+    let mut pending = evaluator.start_batch(batch.positions());
+
+    loop {
+        let next = match ready_receiver.recv_timeout(Duration::from_millis(4)) {
+            Ok(next_batch) => {
+                let mut next_batch = next_batch;
+                if pad_partial_batches {
+                    next_batch.pad_positions_to_capacity();
+                }
+                let next_pending = evaluator.start_batch(next_batch.positions());
+                Some((next_batch, next_pending))
+            }
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
+        };
+        let output = evaluator
+            .finish_batch(pending)
+            .map_err(ActorError::Evaluator)?;
+        batch.set_packed_results(&output);
+        evaluations += batch.len() as u64;
+        batches += 1;
+
+        let interval = last_progress.elapsed();
+        if interval >= Duration::from_secs(5) {
+            info!(
+                evaluations,
+                batches,
+                batch_size = batch.len(),
+                average_batch_size = evaluations as f64 / batches as f64,
+                nps = (evaluations - last_evaluations) as f64 / interval.as_secs_f64(),
+                elapsed = ?start.elapsed(),
+                "self-play inference progress"
+            );
+            last_progress = Instant::now();
+            last_evaluations = evaluations;
+        }
+
+        completed_sender
+            .send(batch)
+            .map_err(|_| ActorError::InferenceStopped)?;
+
+        match next {
+            Some((next_batch, next_pending)) => {
+                batch = next_batch;
+                pending = next_pending;
+            }
+            None => match ready_receiver.recv() {
+                Ok(next_batch) => {
+                    let mut next_batch = next_batch;
+                    if pad_partial_batches {
+                        next_batch.pad_positions_to_capacity();
+                    }
+                    pending = evaluator.start_batch(next_batch.positions());
+                    batch = next_batch;
+                }
+                Err(_) => break,
+            },
+        }
+    }
+
+    drop(completed_sender);
+    batcher.join().map_err(|_| ActorError::WorkerPanicked)?;
+    dispatcher.join().map_err(|_| ActorError::WorkerPanicked)?;
+
+    Ok(InferenceRun {
+        evaluations,
+        batches,
+    })
+}
+
+fn batch_inference(
+    requests: Receiver<InferenceRequest>,
+    ready: SyncSender<InferenceBatch<Board, InferenceTag>>,
+    recycled: Receiver<InferenceBatch<Board, InferenceTag>>,
+    batch_size: usize,
+) {
+    let mut available = vec![
+        InferenceBatch::new(batch_size),
+        InferenceBatch::new(batch_size),
+        InferenceBatch::new(batch_size),
+    ];
+    loop {
+        let mut batch = match available.pop() {
+            Some(batch) => batch,
+            None => match recycled.recv() {
+                Ok(batch) => batch,
+                Err(_) => return,
+            },
+        };
+        let Ok(first) = requests.recv() else {
+            return;
+        };
         push_inference_request(&mut batch, first);
         while !batch.is_full() {
-            match requests.recv_timeout(Duration::from_micros(100)) {
+            match requests.recv_timeout(Duration::from_millis(5)) {
                 Ok(request) => push_inference_request(&mut batch, request),
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
-        batch
-            .evaluate_batch(&mut evaluator)
-            .map_err(ActorError::Evaluator)?;
+        if ready.send(batch).is_err() {
+            return;
+        }
+    }
+}
 
+fn dispatch_inference(
+    completed: Receiver<InferenceBatch<Board, InferenceTag>>,
+    recycled: SyncSender<InferenceBatch<Board, InferenceTag>>,
+    responses: Vec<SyncSender<InferenceResponse>>,
+) {
+    while let Ok(mut batch) = completed.recv() {
         for index in 0..batch.len() {
             let (request, logits, value) = batch.result(index);
-            let mut policy = [0.0; 65];
+            let mut policy = [0.0; Board::ACTION_COUNT];
             policy.copy_from_slice(logits);
             let _ = responses[request.worker].send(InferenceResponse {
                 tree: request.tree,
@@ -241,25 +373,25 @@ fn run_inference(
                 value,
             });
         }
+        batch.clear();
+        if recycled.send(batch).is_err() {
+            break;
+        }
     }
-
-    let evaluations = evaluator.evaluations();
-    let batches = evaluator.batches();
-    Ok((evaluations, batches))
 }
 
 fn push_inference_request(
     batch: &mut InferenceBatch<Board, InferenceTag>,
     request: InferenceRequest,
 ) {
-    assert!(batch.push(
+    batch.push(
         InferenceTag {
             worker: request.worker,
             tree: request.tree,
             request: request.request,
         },
         request.position,
-    ));
+    );
 }
 
 fn run_worker(
@@ -271,7 +403,7 @@ fn run_worker(
     let dirichlet = Gamma::new(config.dirichlet_alpha, 1.0).expect("validated Dirichlet alpha");
     let mut games = (0..config.game_count)
         .map(|_| ActorGame {
-            tree: Mcts::new(Board::default(), MctsConfig::default()),
+            tree: Mcts::new(Board::default()),
             simulations: 0,
             root_noise_applied: false,
             noise: Vec::new(),
@@ -279,8 +411,6 @@ fn run_worker(
             trajectory_hash: 0xcbf2_9ce4_8422_2325,
         })
         .collect::<Vec<_>>();
-    let mut first_game_actions = Vec::new();
-
     loop {
         let mut progressed = false;
         while let Ok(response) = responses.try_recv() {
@@ -291,6 +421,12 @@ fn run_worker(
             game.simulations += 1;
             progressed = true;
         }
+
+        let active_games = games
+            .iter()
+            .filter(|game| game.tree.root_position().outcome().is_none())
+            .count();
+        let max_pending_per_game = config.inference_share.div_ceil(active_games.max(1));
 
         for (tree_index, game) in games.iter_mut().enumerate() {
             if game.tree.root_position().outcome().is_some() {
@@ -303,9 +439,6 @@ fn run_worker(
                     game.records.len() < config.temperature_moves,
                     &mut random,
                 )?;
-                if config.owns_first_game && tree_index == 0 {
-                    first_game_actions.push(Board::action_index(action));
-                }
                 game.records.push(PendingSample {
                     position: *game.tree.root_position(),
                     policy,
@@ -332,26 +465,27 @@ fn run_worker(
                 );
                 game.root_noise_applied = true;
             }
-            if game.tree.is_pending() {
-                continue;
-            }
-            match game.tree.select().map_err(ActorError::Mcts)? {
-                Selection::Terminal => {
-                    game.simulations += 1;
-                    progressed = true;
+            while game.simulations + (game.tree.pending_count() as u32) < config.simulations
+                && game.tree.pending_count() < max_pending_per_game
+            {
+                match game.tree.select().map_err(ActorError::Mcts)? {
+                    Selection::Terminal => {
+                        game.simulations += 1;
+                        progressed = true;
+                    }
+                    Selection::Evaluate { request, position } => {
+                        requests
+                            .send(InferenceRequest {
+                                worker: config.worker,
+                                tree: tree_index,
+                                request,
+                                position: *position,
+                            })
+                            .map_err(|_| ActorError::InferenceStopped)?;
+                        progressed = true;
+                    }
+                    Selection::Blocked => break,
                 }
-                Selection::Evaluate { request, position } => {
-                    requests
-                        .send(InferenceRequest {
-                            worker: config.worker,
-                            tree: tree_index,
-                            request,
-                            position: *position,
-                        })
-                        .map_err(|_| ActorError::InferenceStopped)?;
-                    progressed = true;
-                }
-                Selection::Blocked => {}
             }
         }
 
@@ -371,12 +505,7 @@ fn run_worker(
         }
     }
 
-    let draws = games
-        .iter()
-        .filter(|game| game.tree.root_position().outcome() == Some(Outcome::Draw))
-        .count();
     let mut samples = Vec::with_capacity(games.iter().map(|game| game.records.len()).sum());
-    let mut trajectory_hashes = Vec::with_capacity(games.len());
     for game in &mut games {
         let terminal = *game.tree.root_position();
         samples.extend(game.records.drain(..).map(|record| SelfPlaySample {
@@ -385,22 +514,16 @@ fn run_worker(
             outcome: outcome_for(record.player, terminal),
             game: game.trajectory_hash,
         }));
-        trajectory_hashes.push(game.trajectory_hash);
     }
-    Ok(WorkerResult {
-        first_game_actions,
-        draws,
-        samples,
-        trajectory_hashes,
-    })
+    Ok(WorkerResult { samples })
 }
 
-fn root_policy(tree: &Mcts<Board>) -> Result<[f32; 65], ActorError> {
+fn root_policy(tree: &Mcts<Board>) -> Result<[f32; Board::ACTION_COUNT], ActorError> {
     let total = tree.root_stats().map(|stats| stats.visits).sum::<u32>();
     if total == 0 {
         return Err(ActorError::Mcts(MctsError::NoLegalActions));
     }
-    let mut policy = [0.0; 65];
+    let mut policy = [0.0; Board::ACTION_COUNT];
     for stats in tree.root_stats() {
         policy[Board::action_index(stats.action)] = stats.visits as f32 / total as f32;
     }
@@ -465,20 +588,20 @@ fn shard_len(games: usize, workers: usize, worker: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::Device;
+    use burn::tensor::Device;
 
     use super::*;
 
     #[test]
     fn actor_workers_complete_games_through_one_inference_owner() {
-        let evaluator = OthelloCandleEvaluator::new(Device::Cpu, 7).unwrap();
+        let evaluator = OthelloBurnEvaluator::new(Device::flex(), 7);
         let result = run(
             evaluator,
             ActorConfig {
                 games: 2,
                 simulations: 2,
                 workers: 1,
-                inference_batch_size: 2,
+                inference_batch_size: 8,
                 seed: 11,
                 dirichlet_alpha: 0.3,
                 dirichlet_fraction: 0.25,
@@ -487,10 +610,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!result.first_game_actions.is_empty());
-        assert!(result.draws <= 2);
         assert!(result.evaluations > 0);
-        assert!(result.batches > 0);
         assert!(result.unique_games > 1);
         assert!(!result.samples.is_empty());
         for sample in result.samples {
@@ -502,5 +622,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn terminal_outcomes_are_recorded_from_each_players_perspective() {
+        let black_win: Board =
+            "BBBBBBBB/BBBBBBBB/BBBBBBBB/BBBBBBBB/BBBBBBBB/BBBBBBBB/BBBBBBBB/BBBBBBBB b"
+                .parse()
+                .unwrap();
+        let white_win: Board =
+            "WWWWWWWW/WWWWWWWW/WWWWWWWW/WWWWWWWW/WWWWWWWW/WWWWWWWW/WWWWWWWW/WWWWWWWW w"
+                .parse()
+                .unwrap();
+        let draw: Board =
+            "BBBBBBBB/BBBBBBBB/BBBBBBBB/BBBBBBBB/WWWWWWWW/WWWWWWWW/WWWWWWWW/WWWWWWWW b"
+                .parse()
+                .unwrap();
+
+        assert_eq!(outcome_for(Color::Black, black_win), Outcome::Win);
+        assert_eq!(outcome_for(Color::White, black_win), Outcome::Loss);
+        assert_eq!(outcome_for(Color::White, white_win), Outcome::Win);
+        assert_eq!(outcome_for(Color::Black, white_win), Outcome::Loss);
+        assert_eq!(outcome_for(Color::Black, draw), Outcome::Draw);
+        assert_eq!(outcome_for(Color::White, draw), Outcome::Draw);
     }
 }

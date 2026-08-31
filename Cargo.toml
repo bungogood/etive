@@ -19,6 +19,7 @@ clap = { version = "4.5.46", features = ["derive"] }
 csv = "1.4.0"
 cubecl-environment = { git = "https://github.com/tracel-ai/cubecl.git", rev = "0f1e3ac49f54f84dd5b14a8acd2af3e3a86338b7", optional = true }
 fs2 = "0.4.3"
+libm = "0.2.15"
 rand = "0.9.2"
 rand_distr = "0.5.1"
 serde = { version = "1.0.219", features = ["derive"] }

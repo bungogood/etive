@@ -210,16 +210,7 @@ where
 }
 
 fn standard_normal_cdf(value: f64) -> f64 {
-    let absolute = value.abs();
-    let scale = 1.0 / (1.0 + 0.231_641_9 * absolute);
-    let density = (-0.5 * absolute * absolute).exp() / (2.0 * std::f64::consts::PI).sqrt();
-    let tail = density
-        * scale
-        * (0.319_381_530
-            + scale
-                * (-0.356_563_782
-                    + scale * (1.781_477_937 + scale * (-1.821_255_978 + scale * 1.330_274_429))));
-    if value >= 0.0 { 1.0 - tail } else { tail }
+    0.5 * (1.0 + libm::erf(value / std::f64::consts::SQRT_2))
 }
 
 #[cfg(test)]

@@ -3,7 +3,9 @@ use burn::tensor::{Device, FloatDType, Tensor, TensorData, TensorReadError};
 use std::sync::OnceLock;
 
 use super::{Board, OthelloEncoding, OthelloNetwork};
-use crate::evaluator::{BatchEvaluator, EvaluationCounter, PipelinedEvaluator};
+use crate::evaluator::{
+    BatchEvaluator, EvaluationCounter, PipelinedEvaluator, unpack_packed_results,
+};
 use crate::game::Game;
 
 #[cfg(feature = "cuda")]
@@ -100,8 +102,13 @@ impl OthelloBurnEvaluator {
     pub const fn batches(&self) -> u64 {
         self.batches
     }
+}
 
-    fn start_batch(&mut self, games: &[Board]) -> PendingOthelloInference {
+impl PipelinedEvaluator<Board> for OthelloBurnEvaluator {
+    type Error = TensorReadError;
+    type Pending = PendingOthelloInference;
+
+    fn start_batch(&mut self, games: &[Board]) -> Self::Pending {
         assert!(!games.is_empty(), "inference batch must not be empty");
         self.input.resize(games.len() * OthelloEncoding::LEN, 0.0);
         OthelloEncoding::encode_batch(games, &mut self.input);
@@ -129,10 +136,7 @@ impl OthelloBurnEvaluator {
         }
     }
 
-    fn finish_batch(
-        &mut self,
-        pending: PendingOthelloInference,
-    ) -> Result<Vec<f32>, TensorReadError> {
+    fn finish_batch(&mut self, pending: Self::Pending) -> Result<Vec<f32>, Self::Error> {
         let data = pending
             .stream
             .enter(|| burn::tensor::read_sync(pending.output.into_data_async()))?;
@@ -140,19 +144,6 @@ impl OthelloBurnEvaluator {
         self.evaluations += pending.batch_size as u64;
         self.batches += 1;
         Ok(output)
-    }
-}
-
-impl PipelinedEvaluator<Board> for OthelloBurnEvaluator {
-    type Error = TensorReadError;
-    type Pending = PendingOthelloInference;
-
-    fn start_batch(&mut self, games: &[Board]) -> Self::Pending {
-        Self::start_batch(self, games)
-    }
-
-    fn finish_batch(&mut self, pending: Self::Pending) -> Result<Vec<f32>, Self::Error> {
-        Self::finish_batch(self, pending)
     }
 }
 
@@ -173,14 +164,7 @@ impl BatchEvaluator<Board> for OthelloBurnEvaluator {
 
         let pending = self.start_batch(games);
         let output = self.finish_batch(pending)?;
-        let width = Board::ACTION_COUNT + 1;
-        assert_eq!(output.len(), values.len() * width);
-        for (index, row) in output.chunks_exact(width).enumerate() {
-            let start = index * Board::ACTION_COUNT;
-            policy_logits[start..start + Board::ACTION_COUNT]
-                .copy_from_slice(&row[..Board::ACTION_COUNT]);
-            values[index] = row[Board::ACTION_COUNT];
-        }
+        unpack_packed_results(&output, policy_logits, values, Board::ACTION_COUNT);
         Ok(())
     }
 }

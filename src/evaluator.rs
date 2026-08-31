@@ -122,14 +122,27 @@ impl<G: Game, T> InferenceBatch<G, T> {
         self.policy_logits
             .resize(self.positions.len() * G::ACTION_COUNT, 0.0);
         self.values.resize(self.positions.len(), 0.0);
-        let width = G::ACTION_COUNT + 1;
-        assert_eq!(output.len(), self.values.len() * width);
-        for (index, row) in output.chunks_exact(width).enumerate() {
-            let start = index * G::ACTION_COUNT;
-            self.policy_logits[start..start + G::ACTION_COUNT]
-                .copy_from_slice(&row[..G::ACTION_COUNT]);
-            self.values[index] = row[G::ACTION_COUNT];
-        }
+        unpack_packed_results(
+            output,
+            &mut self.policy_logits,
+            &mut self.values,
+            G::ACTION_COUNT,
+        );
+    }
+}
+
+pub(crate) fn unpack_packed_results(
+    output: &[f32],
+    policy_logits: &mut [f32],
+    values: &mut [f32],
+    action_count: usize,
+) {
+    assert_eq!(policy_logits.len(), values.len() * action_count);
+    assert_eq!(output.len(), values.len() * (action_count + 1));
+    for (index, row) in output.chunks_exact(action_count + 1).enumerate() {
+        let start = index * action_count;
+        policy_logits[start..start + action_count].copy_from_slice(&row[..action_count]);
+        values[index] = row[action_count];
     }
 }
 
